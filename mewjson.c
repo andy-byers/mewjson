@@ -774,8 +774,9 @@ static enum Token parserAdvance(struct JsonParser *parser, const char **ptr)
     return kTokenError;
 }
 
-static int parserFinish(struct JsonParser *parser, const char *ptr, enum State state)
+static int parserFinish(struct JsonParser *parser, enum State state, const char **ptr)
 {
+    skipWhitespace(ptr);
     if (parser->status != kParseOk) {
         return -1;
     }
@@ -787,7 +788,7 @@ static int parserFinish(struct JsonParser *parser, const char *ptr, enum State s
         parser->status = kParseContainerNotClosed;
         return -1;
     }
-    if (state != kStateEnd || skipWhitespace(&ptr) != EOF) {
+    if (state != kStateEnd) {
         // Non-specific syntax error.
         parser->status = kParseSyntaxError;
         return -1;
@@ -804,7 +805,27 @@ static int parserParse(struct JsonParser *parser, const char **ptr)
         state = predictState(state, token);
         state = transitState(parser, state);
     } while (state > kStateBegin);
-    return parserFinish(parser, *ptr, state);
+    return parserFinish(parser, state, ptr);
+}
+
+static void parserFinalize(struct JsonParser *parser, JsonSize offset, JsonSize length)
+{
+    parser->offset = MIN(offset, length);
+    if (parser->status != kParseOk) {
+        goto handle_error;
+    }
+    // The char * used to iterate over the input buffer should be 1 or more bytes past
+    // the first padding byte (skipWhitespace() is called in parserFinish() to skip past
+    // trailing whitespace). Otherwise, there is junk at the end of the input.
+    if (offset <= length) {
+        parser->status = kParseSyntaxError;
+        goto handle_error;
+    }
+    return;
+
+handle_error:
+    jsonDestroyDocument(parser->x.doc);
+    parser->x.doc = NULL;
 }
 
 #define PADDING_LENGTH 4
@@ -812,6 +833,7 @@ static int parserParse(struct JsonParser *parser, const char **ptr)
 MEWJSON_NODISCARD
 JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *parser)
 {
+    *parser = (struct JsonParser){.offset = -1};
     char *text = JSON_MALLOC(length + PADDING_LENGTH);
     JsonDocument *doc = JSON_MALLOC(sizeof(JsonDocument));
     if (!text || !doc) {
@@ -823,21 +845,13 @@ JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *pa
     memcpy(text, input, length);
     memset(text + length, EOF, PADDING_LENGTH);
     *doc = (JsonDocument){.text = text};
-    *parser = (struct JsonParser){
-        .x = (struct JsonParserPrivate){.doc = doc},
-        .offset = -1,
-    };
+    parser->x.doc = doc;
 
     // Parse the document.
     const char *ptr = text;
     parserParse(parser, &ptr);
-    parser->offset = MIN(length, ptr - text);
-
-    if (parser->status != kParseOk) {
-        jsonDestroyDocument(doc);
-        doc = NULL;
-    }
-    return doc;
+    parserFinalize(parser, ptr - text, length);
+    return parser->x.doc;
 }
 
 struct Writer {
