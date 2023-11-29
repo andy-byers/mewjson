@@ -104,11 +104,8 @@ struct JsonDocument {
 
 static JsonValue *fetchValue(JsonDocument *doc, JsonSize index)
 {
-    if (index >= 0) {
-        assert(index < doc->length);
-        return &doc->values[index];
-    }
-    return NULL;
+    assert(index >= 0 && index < doc->length);
+    return &doc->values[index];
 }
 
 static JsonValue *docAppendValue(struct JsonParser *parser, enum JsonType type)
@@ -731,14 +728,14 @@ static enum State parserEndContainer(struct JsonParser *parser)
 
     --parser->x.depth;
     if (parser->x.depth > 0) {
-        const JsonValue *parent = fetchValue(doc, parser->x.upIndex);
+        up = fetchValue(doc, parser->x.upIndex);
         // Pretend like the parser just finished reading an object member value or an array
         // element. Essentially, we are considering the whole object or array that we just
         // left to be a single value, rather than a compound structure. We have to check
         // the grandparent, because the kOE token has not been accepted yet (acceptToken()
         // below). The parser control is technically still inside the object or array
         // presently being closed.
-        return isObject(parent) ? kO2 : kA1;
+        return isObject(up) ? kO2 : kA1;
     }
     // Just closed the root-level structure, so we must be finished. It is an error
     // otherwise, since RFC 8259 only allows a singular root.
