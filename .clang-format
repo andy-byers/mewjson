@@ -1,0 +1,8 @@
+BasedOnStyle: LLVM
+AllowShortFunctionsOnASingleLine: Empty
+AccessModifierOffset: -4
+BreakBeforeBraces: Linux
+ColumnLimit: 100
+IndentCaseLabels: true
+IndentGotoLabels: false
+IndentWidth: 4
