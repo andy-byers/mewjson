@@ -2,8 +2,8 @@
 // Distributed under the MIT License (http://opensource.org/licenses/MIT)
 //
 // This file contains the API documentation for mewjson. There are interfaces for reading and
-// writing JSON (jsonParse, jsonBuild, jsonGenerate, etc.), as well as accessing an in-memory
-// representation of the data (JsonDocument, JsonValue, etc.).
+// writing JSON (jsonRead, jsonWrite), as well as accessing an in-memory representation of the
+// data (JsonDocument, JsonValue, etc.).
 //
 // General API rules:
 // 1. Pointers passed to API functions must be valid, unless otherwise noted
@@ -36,16 +36,8 @@
 typedef _Bool JsonBool;
 typedef ptrdiff_t JsonSize;
 
-// JSON parsing context
-typedef struct JsonParser JsonParser;
-
-// Return a new JSON parser
-// jsonDestroyParser() must be called on the returned parser when it is no longer needed.
-MEWJSON_NODISCARD
-JsonParser *jsonCreateParser(void);
-
-// Free memory associated with a parser
-void jsonDestroyParser(JsonParser *parser);
+// Parsed JSON document
+typedef struct JsonDocument JsonDocument;
 
 // Status code produced by the parser
 enum JsonParseStatus {
@@ -67,15 +59,22 @@ enum JsonParseStatus {
     kParseStatusCount
 };
 
-// Return the last error encountered by the parser
-enum JsonParseStatus jsonLastStatus(const JsonParser *parser);
+// JSON parser context
+struct JsonParser {
+    // Byte offset that the parser stopped on in the input buffer.
+    JsonSize offset;
 
-// Return the offset of the last parsed byte in the input stream
-// If an error occurred during the last parse, this function shows roughly where it happened.
-JsonSize jsonLastOffset(const JsonParser *parser);
+    // Status code pertaining to the last parse. Values is kParseOk on success, and some other
+    // variant on failure.
+    enum JsonParseStatus status;
 
-// Parsed JSON document
-typedef struct JsonDocument JsonDocument;
+    // Private members.
+    struct JsonParserPrivate {
+        JsonDocument *doc;
+        JsonSize upIndex;
+        JsonSize depth;
+    } x;
+};
 
 // Free memory associated with a document
 void jsonDestroyDocument(JsonDocument *doc);
@@ -88,7 +87,7 @@ void jsonDestroyDocument(JsonDocument *doc);
 // strings without any escaped characters). jsonDestroyDocument() must be called on the returned
 // document when it is no longer needed.
 MEWJSON_NODISCARD
-JsonDocument *jsonRead(const char *input, JsonSize length, JsonParser *parser);
+JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *parser);
 
 // JSON value (object, array, string, integer, real number, boolean, or null)
 typedef struct JsonValue JsonValue;
@@ -101,10 +100,7 @@ JsonValue *jsonRoot(JsonDocument *doc);
 // Write a JSON value and all its descendents to a buffer
 // Returns the number of bytes needed to hold the serialized JSON data. jsonWrite() will write as
 // much as possible if there is not enough space. Call jsonWrite(NULL, 0, root) to check how many
-// bytes are required to write a particular value. This function allocates memory in order to
-// traverse the document and will return -1 if an allocation fails. The written text is always a
-// valid JSON document.
-MEWJSON_NODISCARD
+// bytes are required to write a particular value. The written text is always a valid JSON document.
 JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root);
 
 enum JsonQueryStatus {
@@ -115,14 +111,20 @@ enum JsonQueryStatus {
     kQueryStatusCount
 };
 
+// Find a descendent of the given root value using a JSON pointer
 MEWJSON_NODISCARD
 enum JsonQueryStatus jsonFind(JsonValue *root, const char *jsonPtr, JsonSize ptrSize,
                               JsonValue **out);
 
+// Add an object member key to a JSON pointer
 JsonSize jsonPointerWriteKey(char *jsonPtr, JsonSize ptrSize, const char *key, JsonSize length);
 
+// Add an array index to a JSON pointer
 JsonSize jsonPointerWriteIndex(char *jsonPtr, JsonSize ptrSize, JsonSize index);
 
+// Write the JSON pointer that refers to the given JSON value, relative to the root
+// Returns the number of bytes needed to hold the JSON pointer, or -1 if the search value is not a
+// descendent of the root value.
 JsonSize jsonLocate(JsonValue *root, char *jsonPtr, JsonSize ptrSize, JsonValue *val);
 
 // Return the length of a JSON value
@@ -165,13 +167,30 @@ double jsonReal(const JsonValue *val);
 // Return the value of a JSON boolean
 JsonBool jsonBoolean(const JsonValue *val);
 
-// Find the index of the member with the given key
+// Find the index of the object member with the given key
 // Returns -1 if the member does not exist.
 JsonSize jsonObjectFind(JsonValue *obj, const char *key, JsonSize length);
 
-// Return a child from a JSON object or array
+// Return a child value from a JSON object or array
 // Returns NULL if the index is out of bounds.
 JsonValue *jsonContainerGet(JsonValue *container, JsonSize index);
+
+// Determines the behavior of a cursor during traversal
+// The following examples show how each mode behaves. The numbers indicate the order in
+// which the various JSON values are encountered. Each example assumes that the cursor is
+// started on the root value: an array in the first case and an integer in the second.
+//  Document  | kCursorNormal | kCursorRecursive
+// -----------|---------------|------------------
+//   [        |               | 1
+//     "a",   | 1             | 2
+//     [      | 2             | 3
+//       true |               | 4
+//     ]      |               |
+//   ]        |               |
+//
+//  Document  | kCursorNormal | kCursorRecursive
+// -----------|---------------|------------------
+//   42       |               | 1
 
 enum JsonCursorMode {
     kCursorNormal,
@@ -184,12 +203,19 @@ struct JsonCursor {
     enum JsonCursorMode mode;
 };
 
+// Initialize a cursor for traversal over a JSON value
 void jsonCursorInit(JsonValue *root, enum JsonCursorMode mode, struct JsonCursor *c);
 
+// Return true if a cursor is valid, false otherwise
 JsonBool jsonCursorIsValid(const struct JsonCursor *c);
 
+// Move a cursor to the next JSON value
 void jsonCursorNext(struct JsonCursor *c);
 
+// Return a pointer to the first byte of the current object member's key, or NULL if the cursor
+// is not positioned on an object member
+// If the length parameter is not NULL, this function will write to it the length of the key in
+// bytes.
 const char *jsonCursorKey(struct JsonCursor *c, JsonSize *length);
 
 // General-purpose allocation routines used by the library

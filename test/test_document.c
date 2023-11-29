@@ -1,9 +1,6 @@
 #include "test.h"
-#include <stdarg.h>
-#include <stdbool.h>
 #include <string.h>
 
-static JsonSize sBytesUsed = 0;
 static int sOomCounter = -1;
 
 static void *testMalloc(size_t size)
@@ -55,11 +52,10 @@ static void testcaseLongStrings()
     }
     strcpy(ptr, "]");
 
-    JsonParser *parser = jsonCreateParser();
-    JsonDocument *doc = jsonRead(buffer, (JsonSize)strlen(buffer), parser);
-    CHECK(jsonLastStatus(parser) == kParseOk);
+    struct JsonParser parser;
+    JsonDocument *doc = jsonRead(buffer, (JsonSize)strlen(buffer), &parser);
+    CHECK(parser.status == kParseOk);
     CHECK(doc);
-    jsonDestroyParser(parser); // Can be freed before the document
     jsonDestroyDocument(doc);
     free(buffer);
 }
@@ -166,13 +162,13 @@ static const char kOomExample[] =
 static void testcaseReaderOom()
 {
     testcaseInit("reader_oom");
-    JsonParser *parser = jsonCreateParser();
+    struct JsonParser parser;
 
     int failures = 0;
     for (;; ++failures) {
         sOomCounter = failures;
-        JsonDocument *doc = jsonRead(kOomExample, (JsonSize)strlen(kOomExample), parser);
-        const enum JsonParseStatus e = jsonLastStatus(parser);
+        JsonDocument *doc = jsonRead(kOomExample, (JsonSize)strlen(kOomExample), &parser);
+        const enum JsonParseStatus e = parser.status;
         if (e == kParseOk) {
             CHECK(doc);
             jsonDestroyDocument(doc);
@@ -182,7 +178,6 @@ static void testcaseReaderOom()
     }
     // Will likely end up failing quite a bit more than 2 times. Just a sanity check.
     CHECK(failures > 2);
-    jsonDestroyParser(parser);
 }
 
 // Modified from https://json.org/example.html. Added "/menu/" member (empty key).
@@ -221,7 +216,7 @@ static JsonValue *testFind(JsonValue *root, const char *jsonPtr)
     JsonValue *val;
     CHECK(kQueryOk == jsonFind(root, jsonPtr, (JsonSize)strlen(jsonPtr), &val));
 
-    char location[1024];
+    static char location[8192];
     const JsonSize len = jsonLocate(root, location, SIZEOF(location), val);
     CHECK(len >= 0 && len <= SIZEOF(location));
     CHECK(0 == memcmp(jsonPtr, location, len));
@@ -256,11 +251,10 @@ static void testForEachValue(JsonValue *root, EachCallback callback)
 
 static JsonDocument *createTestDocument(const char *text)
 {
-    JsonParser *parser = jsonCreateParser();
-    JsonDocument *doc = jsonRead(text, (JsonSize)strlen(text), parser);
-    CHECK(jsonLastStatus(parser) == kParseOk);
+    struct JsonParser parser;
+    JsonDocument *doc = jsonRead(text, (JsonSize)strlen(text), &parser);
+    CHECK(parser.status == kParseOk);
     CHECK(doc);
-    jsonDestroyParser(parser);
     return doc;
 }
 
@@ -479,6 +473,55 @@ static void testcaseFindWithEscapes()
     jsonDestroyDocument(doc);
 }
 
+static void testcaseFindLongKeys()
+{
+    testcaseInit("find_long_keys");
+    char longKey[1024];
+    memset(longKey, '*', SIZEOF(longKey));
+
+    char *jsonText = testMalloc(SIZEOF(longKey) * 3);
+    char *text = jsonText;
+    *text++ = '{';
+    *text++ = '"';
+    memcpy(text, longKey, SIZEOF(longKey));
+    text += SIZEOF(longKey);
+    *text++ = '"';
+    *text++ = ':';
+    *text++ = '{';
+    *text++ = '"';
+    memcpy(text, longKey, SIZEOF(longKey));
+    text += SIZEOF(longKey);
+    *text++ = '"';
+    *text++ = ':';
+    *text++ = '4';
+    *text++ = '2';
+    *text++ = '}';
+    *text++ = '}';
+    *text++ = '\0';
+
+    JsonDocument *doc = createTestDocument(jsonText);
+    JsonValue *root = jsonRoot(doc);
+
+    testForEachValue(root, testCheckLocations);
+
+    char *jsonPtr = testMalloc(SIZEOF(longKey) * 2 + 3);
+    char *ptr = jsonPtr;
+    *ptr++ = '/';
+    memcpy(ptr, longKey, SIZEOF(longKey));
+    ptr += SIZEOF(longKey);
+    *ptr++ = '/';
+    memcpy(ptr, longKey, SIZEOF(longKey));
+    ptr += SIZEOF(longKey);
+    *ptr++ = '\0';
+
+    JsonValue *val = testFind(root, jsonPtr);
+    CHECK(jsonType(val) == kTypeInteger);
+    CHECK(jsonInteger(val) == 42);
+    jsonDestroyDocument(doc);
+    testFree(jsonPtr);
+    testFree(jsonText);
+}
+
 static void testcaseFindInvalidPointer()
 {
     testcaseInit("find_invalid_pointer");
@@ -491,6 +534,64 @@ static void testcaseFindInvalidPointer()
     // Corrupted array index
     testInvalidPointer(root, "/menu/items/01");
     testInvalidPointer(root, "/menu/items/1x");
+
+    jsonDestroyDocument(doc);
+}
+
+static void testcaseCursorContainerRoot()
+{
+    testcaseInit("cursor_container_root");
+    JsonDocument *doc = createTestDocument("[42,[true]]");
+    JsonValue *root = jsonRoot(doc);
+
+    struct JsonCursor c;
+    jsonCursorInit(root, kCursorNormal, &c);
+    CHECK(jsonCursorIsValid(&c));
+    CHECK(jsonType(c.value) == kTypeInteger);
+    CHECK(jsonInteger(c.value) == 42);
+    jsonCursorNext(&c);
+    CHECK(jsonCursorIsValid(&c));
+    CHECK(jsonType(c.value) == kTypeArray);
+    CHECK(jsonLength(c.value) == 1);
+    jsonCursorNext(&c);
+    CHECK(!jsonCursorIsValid(&c));
+
+    jsonCursorInit(root, kCursorRecursive, &c);
+    CHECK(jsonCursorIsValid(&c));
+    CHECK(jsonType(c.value) == kTypeArray);
+    CHECK(jsonLength(c.value) == 2);
+    jsonCursorNext(&c);
+    CHECK(jsonCursorIsValid(&c));
+    CHECK(jsonType(c.value) == kTypeInteger);
+    CHECK(jsonInteger(c.value) == 42);
+    jsonCursorNext(&c);
+    CHECK(jsonCursorIsValid(&c));
+    CHECK(jsonType(c.value) == kTypeArray);
+    CHECK(jsonLength(c.value) == 1);
+    jsonCursorNext(&c);
+    CHECK(jsonCursorIsValid(&c));
+    CHECK(jsonType(c.value) == kTypeBoolean);
+    CHECK(jsonBoolean(c.value));
+    jsonCursorNext(&c);
+    CHECK(!jsonCursorIsValid(&c));
+
+    jsonDestroyDocument(doc);
+}
+
+static void testcaseCursorNonContainerRoot()
+{
+    testcaseInit("cursor_non_container_root");
+    JsonDocument *doc = createTestDocument("42");
+    JsonValue *root = jsonRoot(doc);
+
+    struct JsonCursor c;
+    jsonCursorInit(root, kCursorNormal, &c);
+    CHECK(!jsonCursorIsValid(&c));
+
+    jsonCursorInit(root, kCursorRecursive, &c);
+    CHECK(jsonCursorIsValid(&c));
+    CHECK(jsonType(c.value) == kTypeInteger);
+    CHECK(jsonInteger(c.value) == 42);
 
     jsonDestroyDocument(doc);
 }
@@ -513,7 +614,10 @@ int main()
     testcaseFindInvalidPointer();
     testcaseFindScalarRoot();
     testcaseFindWithEscapes();
+    testcaseFindLongKeys();
     testcaseReaderOom();
+    testcaseCursorContainerRoot();
+    testcaseCursorNonContainerRoot();
     testcaseLongStrings();
 
     checkForLeaks();

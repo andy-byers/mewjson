@@ -42,20 +42,19 @@ static char *writeJsonText(JsonDocument *doc, JsonSize *textLen)
 
 extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    JsonParser *parser = jsonCreateParser();
-    CHECK(parser);
+    struct JsonParser parser;
     // Read straight from the input buffer.
-    JsonDocument *doc = jsonRead((const char *)data, (JsonSize)size, parser);
+    JsonDocument *doc = jsonRead((const char *)data, (JsonSize)size, &parser);
     if (doc) {
-        CHECK(jsonLastStatus(parser) == kParseOk);
+        CHECK(parser.status == kParseOk);
         // Serialize to a different buffer.
         JsonSize textLen = 0;
         char *copy1 = writeJsonText(doc, &textLen);
         jsonDestroyDocument(doc);
 
         // Read the text we just wrote.
-        JsonDocument *doc2 = jsonRead(copy1, textLen, parser);
-        CHECK(jsonLastStatus(parser) == kParseOk);
+        JsonDocument *doc2 = jsonRead(copy1, textLen, &parser);
+        CHECK(parser.status == kParseOk);
         CHECK(doc2);
 
         // Write again to another buffer.
@@ -68,8 +67,7 @@ extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         xFree(copy2);
     } else {
         // Must be some type of corruption.
-        CHECK(jsonLastStatus(parser) != kParseNoMemory);
+        CHECK(parser.status != kParseNoMemory);
     }
-    jsonDestroyParser(parser);
     return 0;
 }

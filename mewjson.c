@@ -33,11 +33,11 @@ struct Slice {
         .ptr = (s), .len = strlen(s)                                                               \
     }
 
-static void sliceAdvance(struct Slice *s, JsonSize n)
+static void sliceAdvance(struct Slice *s)
 {
-    assert(n <= s->len);
-    s->ptr += n;
-    s->len -= n;
+    assert(s->len > 0);
+    ++s->ptr;
+    --s->len;
 }
 
 static struct JsonAllocator sAllocator = {
@@ -54,123 +54,6 @@ void jsonSetAllocator(struct JsonAllocator a)
 #define JSON_MALLOC(size) sAllocator.malloc((size_t)(size))
 #define JSON_REALLOC(ptr, size) sAllocator.realloc(ptr, (size_t)(size))
 #define JSON_FREE(ptr) sAllocator.free(ptr)
-
-struct Arena {
-    struct Arena *next;
-    JsonSize base;
-    JsonSize size;
-    char data[];
-};
-
-#define ARENA_MIN_SIZE 64
-#define ARENA_MAX_SIZE 268435456
-
-struct MemoryPool {
-    struct Arena *first;
-};
-
-static void poolDestroy(struct MemoryPool *ap)
-{
-    for (struct Arena *a = ap->first; a;) {
-        struct Arena *p = a;
-        a = a->next;
-        JSON_FREE(p);
-    }
-    ap->first = NULL;
-}
-
-MEWJSON_NODISCARD
-static void *poolAlloc(struct MemoryPool *mp, JsonSize size, JsonSize align)
-{
-    assert(size && size <= ARENA_MAX_SIZE);
-    assert(align && (align & (align - 1)) == 0);
-    // Find the first arena able to satisfy the request.
-    struct Arena *a = mp->first;
-    JsonSize arenaSize = ARENA_MIN_SIZE;
-    while (a) {
-        assert(a->size >= a->base);
-        // Only use this arena if there is definitely enough memory for an object of
-        // the given size and alignment. This may end up ignoring arenas that actually
-        // have enough memory, but it should only happen for arenas that are almost
-        // full already, and only if the alignment is greater than 1.
-        if (a->base + size + align - 1 <= a->size) {
-            break;
-        }
-        a = a->next;
-        // Keep track of how big the next arena should be. A new arena is only allocated if we
-        // iterate through all arenas and don't find enough space, so the new arena will be
-        // twice as big as the last one.
-        if (arenaSize < ARENA_MAX_SIZE) {
-            arenaSize *= 2;
-        }
-    }
-    if (!a) {
-        // Make sure the arenaSize is actually large enough for this particular allocation.
-        while (arenaSize < size + align - 1) {
-            arenaSize *= 2;
-        }
-        assert(arenaSize <= ARENA_MAX_SIZE);
-
-        // Add the new arena at the front of the list.
-        a = JSON_MALLOC(SIZEOF(struct Arena) + arenaSize);
-        if (!a) {
-            return NULL;
-        }
-        a->next = mp->first;
-        mp->first = a;
-        a->base = 0;
-        a->size = arenaSize;
-    }
-    // Adjust the pointer and size to account for the alignment.
-    char *begin = a->data + a->base;
-    const uintptr_t pad = -(uintptr_t)begin & (uintptr_t)(align - 1);
-    size += (JsonSize)pad;
-    begin += pad;
-
-    a->base += size;
-    assert(a->base <= a->size);
-    return begin;
-}
-
-// Scratch memory for decoding strings
-struct StringBuilder {
-    char *ptr;
-    JsonSize len;
-    JsonSize cap;
-    JsonBool err;
-};
-
-MEWJSON_NODISCARD
-static JsonBool sbEnsureSpace(struct StringBuilder *sb, JsonSize addedLen)
-{
-    assert(addedLen > 0);
-    if (sb->err) {
-        return 0;
-    }
-    const JsonSize len = sb->len + addedLen;
-    if (len > sb->cap) {
-        JsonSize cap = 4;
-        while (cap < len) {
-            cap *= 2;
-        }
-        char *ptr = JSON_REALLOC(sb->ptr, cap);
-        if (!ptr) {
-            sb->err = 1;
-            return 0;
-        }
-        sb->ptr = ptr;
-        sb->cap = cap;
-    }
-    return 1;
-}
-
-static void sbAppend(struct StringBuilder *sb, char c)
-{
-    if (sbEnsureSpace(sb, 1)) {
-        sb->ptr[sb->len] = c;
-        ++sb->len;
-    }
-}
 
 typedef uint64_t ValueTag;
 // 3 bits are needed to represent the 6 possible JSON value types. The rest of the bits are used
@@ -213,30 +96,10 @@ struct JsonDocument {
     // Padded JSON text that was parsed to create this document
     char *text;
 
-    // Allocator for short and medium-length strings
-    struct MemoryPool strPool;
-
-    // Linked list of long strings
-    char *longStr;
-
     // Array of JSON values representing the document
     JsonValue *values;
     JsonSize length;
     JsonSize capacity;
-};
-
-struct JsonParser {
-    // Per-parse state variables
-    struct ParseState {
-        JsonDocument *doc;
-        JsonSize upIndex;
-        JsonSize depth;
-        JsonSize offset;
-        enum JsonParseStatus status;
-    } x;
-
-    // Accumulator for un-escaping strings
-    struct StringBuilder sb;
 };
 
 static JsonValue *fetchValue(JsonDocument *doc, JsonSize index)
@@ -248,7 +111,7 @@ static JsonValue *fetchValue(JsonDocument *doc, JsonSize index)
     return NULL;
 }
 
-static JsonValue *docAppendValue(JsonParser *parser, enum JsonType type)
+static JsonValue *docAppendValue(struct JsonParser *parser, enum JsonType type)
 {
     JsonDocument *doc = parser->x.doc;
     if (doc->length >= doc->capacity) {
@@ -259,7 +122,7 @@ static JsonValue *docAppendValue(JsonParser *parser, enum JsonType type)
         // Resize the buffer to fit cap pointers to JsonValue.
         JsonValue *ptr = JSON_REALLOC(doc->values, cap * SIZEOF(*doc->values));
         if (!ptr) {
-            parser->x.status = kParseNoMemory;
+            parser->status = kParseNoMemory;
             return NULL;
         }
         doc->values = ptr;
@@ -283,75 +146,17 @@ static JsonValue *docAppendValue(JsonParser *parser, enum JsonType type)
     return val;
 }
 
-#define STRING_INTERN_TAG '\x00'
-#define STRING_EXTERN_TAG '\x01'
-
-MEWJSON_NODISCARD
-static char *allocateShortString(JsonDocument *doc, JsonSize lenWithTag)
-{
-    char *str = poolAlloc(&doc->strPool, lenWithTag, 1);
-    if (str) {
-        *str++ = STRING_INTERN_TAG;
-    }
-    return str;
-}
-
-MEWJSON_NODISCARD
-static char *allocateLongString(JsonDocument *doc, JsonSize lenWithTag)
-{
-    static const JsonSize kPtrWidth = SIZEOF(char *);
-
-    char **firstStr = &doc->longStr;
-    char *str = JSON_MALLOC(kPtrWidth + lenWithTag);
-    if (str) {
-        // Link the strings together so that they can be freed without traversing the document. str
-        // is a pointer from malloc(), so it must be suitably-aligned for a pointer.
-        *(uintptr_t *)str = (uintptr_t)*firstStr;
-        str[kPtrWidth] = STRING_EXTERN_TAG;
-        str += kPtrWidth + 1;
-        *firstStr = str;
-    }
-    return str;
-}
-
-MEWJSON_NODISCARD
-static char *duplicateString(JsonDocument *doc, struct Slice s)
-{
-    const JsonSize totalLen = 1 + s.len + 1; // <tag> + <text> + '\0'
-    char *str = totalLen <= ARENA_MAX_SIZE ? allocateShortString(doc, totalLen) // Intern the string
-                                           : allocateLongString(doc, totalLen); // Use JSON_MALLOC()
-    if (!str) {
-        return NULL;
-    } else if (s.len) {
-        assert(s.len > 0);
-        memcpy(str, s.ptr, (size_t)s.len);
-    }
-    str[s.len] = '\0';
-    return str;
-}
-
-static void docAppendString(JsonParser *parser, struct Slice s, JsonBool inlineStr)
+static void docAppendString(struct JsonParser *parser, struct Slice s)
 {
     JsonValue *val = docAppendValue(parser, kTypeString);
     if (!val) {
         return;
     }
-    const char *str;
-    if (inlineStr) {
-        // No escapes: just store a pointer into the original text.
-        str = s.ptr;
-    } else {
-        // The original string contained 1 or more escapes. Copy the unescaped string.
-        str = duplicateString(parser->x.doc, s);
-        if (!str) {
-            return;
-        }
-    }
     vTagSetSize(&val->tag, s.len);
-    val->v.string = str;
+    val->v.string = s.ptr;
 }
 
-static void docAppendInteger(JsonParser *parser, int64_t i)
+static void docAppendInteger(struct JsonParser *parser, int64_t i)
 {
     JsonValue *val = docAppendValue(parser, kTypeInteger);
     if (val) {
@@ -359,7 +164,7 @@ static void docAppendInteger(JsonParser *parser, int64_t i)
     }
 }
 
-static void docAppendReal(JsonParser *parser, double r)
+static void docAppendReal(struct JsonParser *parser, double r)
 {
     JsonValue *val = docAppendValue(parser, kTypeReal);
     if (val) {
@@ -367,7 +172,7 @@ static void docAppendReal(JsonParser *parser, double r)
     }
 }
 
-static void docAppendBoolean(JsonParser *parser, JsonBool b)
+static void docAppendBoolean(struct JsonParser *parser, JsonBool b)
 {
     JsonValue *val = docAppendValue(parser, kTypeBoolean);
     if (val) {
@@ -375,7 +180,7 @@ static void docAppendBoolean(JsonParser *parser, JsonBool b)
     }
 }
 
-static void docAppendNull(JsonParser *parser)
+static void docAppendNull(struct JsonParser *parser)
 {
     docAppendValue(parser, kTypeNull);
 }
@@ -477,7 +282,7 @@ static int getCodepoint(const char **ptr)
            HEXVAL(c[3]);        //
 }
 
-static enum Token scanNull(JsonParser *parser, const char **ptr)
+static enum Token scanNull(struct JsonParser *parser, const char **ptr)
 {
     if (getChar(ptr) == 'u' && //
         getChar(ptr) == 'l' && //
@@ -485,11 +290,11 @@ static enum Token scanNull(JsonParser *parser, const char **ptr)
         docAppendNull(parser);
         return kTokenValue;
     }
-    parser->x.status = kParseLiteralInvalid;
+    parser->status = kParseLiteralInvalid;
     return kTokenError;
 }
 
-static enum Token scanTrue(JsonParser *parser, const char **ptr)
+static enum Token scanTrue(struct JsonParser *parser, const char **ptr)
 {
     if (getChar(ptr) == 'r' && //
         getChar(ptr) == 'u' && //
@@ -497,11 +302,11 @@ static enum Token scanTrue(JsonParser *parser, const char **ptr)
         docAppendBoolean(parser, 1);
         return kTokenValue;
     }
-    parser->x.status = kParseLiteralInvalid;
+    parser->status = kParseLiteralInvalid;
     return kTokenError;
 }
 
-static enum Token scanFalse(JsonParser *parser, const char **ptr)
+static enum Token scanFalse(struct JsonParser *parser, const char **ptr)
 {
     if (getChar(ptr) == 'a' && //
         getChar(ptr) == 'l' && //
@@ -510,12 +315,12 @@ static enum Token scanFalse(JsonParser *parser, const char **ptr)
         docAppendBoolean(parser, 0);
         return kTokenValue;
     }
-    parser->x.status = kParseLiteralInvalid;
+    parser->status = kParseLiteralInvalid;
     return kTokenError;
 }
 
 MEWJSON_NODISCARD
-static JsonSize scanUtf8(JsonParser *parser, const char **ptr, char byte)
+static JsonSize scanUtf8(const char **ptr, char **out, char byte)
 {
     // Table and shifting trick from @skeeto/branchless-utf8. Only using half of the original
     // table, since 1-byte codepoints have already been handled.
@@ -523,14 +328,15 @@ static JsonSize scanUtf8(JsonParser *parser, const char **ptr, char byte)
     uint8_t c[4] = {(uint8_t)byte};
     assert(c[0] >= 0x80); // ASCII chars already excluded
 
+    char *end = *out;
     uint32_t codepoint;
     switch (kLengths[(c[0] >> 3) - 16]) {
         case 2:
             if (((c[1] = GET_BYTE(ptr)) & 0xC0) != 0x80) {
                 return -1;
             }
-            sbAppend(&parser->sb, (char)c[0]);
-            sbAppend(&parser->sb, (char)c[1]);
+            *end++ = (char)c[0];
+            *end++ = (char)c[1];
             codepoint = ((uint32_t)(c[0] & 0x1F) << 6) | //
                         ((uint32_t)(c[1] & 0x3F) << 0);
             break;
@@ -539,9 +345,9 @@ static JsonSize scanUtf8(JsonParser *parser, const char **ptr, char byte)
                 ((c[2] = GET_BYTE(ptr)) & 0xC0) != 0x80) {
                 return -1;
             }
-            sbAppend(&parser->sb, (char)c[0]);
-            sbAppend(&parser->sb, (char)c[1]);
-            sbAppend(&parser->sb, (char)c[2]);
+            *end++ = (char)c[0];
+            *end++ = (char)c[1];
+            *end++ = (char)c[2];
             codepoint = ((uint32_t)(c[0] & 0x0F) << 12) | //
                         ((uint32_t)(c[1] & 0x3F) << 6) |  //
                         ((uint32_t)(c[2] & 0x3F) << 0);
@@ -552,10 +358,10 @@ static JsonSize scanUtf8(JsonParser *parser, const char **ptr, char byte)
                 ((c[3] = GET_BYTE(ptr)) & 0xC0) != 0x80) {
                 return -1;
             }
-            sbAppend(&parser->sb, (char)c[0]);
-            sbAppend(&parser->sb, (char)c[1]);
-            sbAppend(&parser->sb, (char)c[2]);
-            sbAppend(&parser->sb, (char)c[3]);
+            *end++ = (char)c[0];
+            *end++ = (char)c[1];
+            *end++ = (char)c[2];
+            *end++ = (char)c[3];
             codepoint = ((uint32_t)(c[0] & 0x07) << 18) | //
                         ((uint32_t)(c[1] & 0x3F) << 12) | //
                         ((uint32_t)(c[2] & 0x3F) << 6) |  //
@@ -564,14 +370,17 @@ static JsonSize scanUtf8(JsonParser *parser, const char **ptr, char byte)
         default:
             return -1;
     }
+    *out = end;
     return codepoint >= 0xD800 && codepoint <= 0xDFFF ? -1 : 0;
 }
 
-static enum Token scanString(JsonParser *parser, const char **ptr)
+static enum Token scanString(struct JsonParser *parser, const char **ptr)
 {
+    // Cast away constness. *ptr points into heap-allocated memory. This routine unescapes
+    // strings inplace, since we have already made a copy of the whole text. The unescaping
+    // process only ever decreases the length of a string, so this will always work.
+    char *out = (char *)*ptr;
     const char *begin = *ptr;
-    struct StringBuilder *sb = &parser->sb;
-    sb->len = 0; // Reset string builder
     for (;;) {
         // If c is not EOF, then we can call getChar() at least 4 times without going
         // past the end of the buffer.
@@ -580,33 +389,33 @@ static enum Token scanString(JsonParser *parser, const char **ptr)
             case '\\':
                 switch (getChar(ptr)) {
                     case '"':
-                        sbAppend(sb, '"');
+                        *out++ = '"';
                         break;
                     case '\\':
-                        sbAppend(sb, '\\');
+                        *out++ = '\\';
                         break;
                     case '/':
-                        sbAppend(sb, '/');
+                        *out++ = '/';
                         break;
                     case 'b':
-                        sbAppend(sb, '\b');
+                        *out++ = '\b';
                         break;
                     case 'f':
-                        sbAppend(sb, '\f');
+                        *out++ = '\f';
                         break;
                     case 'n':
-                        sbAppend(sb, '\n');
+                        *out++ = '\n';
                         break;
                     case 'r':
-                        sbAppend(sb, '\r');
+                        *out++ = '\r';
                         break;
                     case 't':
-                        sbAppend(sb, '\t');
+                        *out++ = '\t';
                         break;
                     case 'u': {
                         int codepoint = getCodepoint(ptr);
                         if (codepoint < 0) {
-                            parser->x.status = kParseStringInvalidCodepoint;
+                            parser->status = kParseStringInvalidCodepoint;
                             return kTokenError;
                         }
                         if (0xD800 <= codepoint && codepoint <= 0xDFFF) {
@@ -614,82 +423,69 @@ static enum Token scanString(JsonParser *parser, const char **ptr)
                             // (U+D800–U+DBFF) followed by a low surrogate (U+DC00–U+DFFF).
                             if (codepoint <= 0xDBFF) {
                                 if (getChar(ptr) != '\\' || getChar(ptr) != 'u') {
-                                    parser->x.status = kParseStringInvalidCodepoint;
+                                    parser->status = kParseStringInvalidCodepoint;
                                     return kTokenError;
                                 }
                                 const int codepoint2 = getCodepoint(ptr);
                                 if (codepoint2 < 0xDC00 || codepoint2 > 0xDFFF) {
-                                    parser->x.status = kParseStringMissingLowSurrogate;
+                                    parser->status = kParseStringMissingLowSurrogate;
                                     return kTokenError;
                                 }
                                 codepoint = (((codepoint - 0xD800) << 10) | (codepoint2 - 0xDC00)) +
                                             0x10000;
                             } else {
-                                parser->x.status = kParseStringMissingHighSurrogate;
+                                parser->status = kParseStringMissingHighSurrogate;
                                 return kTokenError;
                             }
                         }
                         // Translate the codepoint into bytes. Modified from @Tencent/rapidjson.
                         if (codepoint <= 0x7F) {
-                            sbAppend(sb, (char)codepoint);
+                            *out++ = (char)codepoint;
                         } else if (codepoint <= 0x7FF) {
-                            sbAppend(sb, (char)(0xC0 | ((codepoint >> 6) & 0xFF)));
-                            sbAppend(sb, (char)(0x80 | ((codepoint & 0x3F))));
+                            *out++ = (char)(0xC0 | ((codepoint >> 6) & 0xFF));
+                            *out++ = (char)(0x80 | ((codepoint & 0x3F)));
                         } else if (codepoint <= 0xFFFF) {
-                            sbAppend(sb, (char)(0xE0 | ((codepoint >> 12) & 0xFF)));
-                            sbAppend(sb, (char)(0x80 | ((codepoint >> 6) & 0x3F)));
-                            sbAppend(sb, (char)(0x80 | (codepoint & 0x3F)));
+                            *out++ = (char)(0xE0 | ((codepoint >> 12) & 0xFF));
+                            *out++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                            *out++ = (char)(0x80 | (codepoint & 0x3F));
                         } else {
                             assert(codepoint <= 0x10FFFF);
-                            sbAppend(sb, (char)(0xF0 | ((codepoint >> 18) & 0xFF)));
-                            sbAppend(sb, (char)(0x80 | ((codepoint >> 12) & 0x3F)));
-                            sbAppend(sb, (char)(0x80 | ((codepoint >> 6) & 0x3F)));
-                            sbAppend(sb, (char)(0x80 | (codepoint & 0x3F)));
+                            *out++ = (char)(0xF0 | ((codepoint >> 18) & 0xFF));
+                            *out++ = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+                            *out++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                            *out++ = (char)(0x80 | (codepoint & 0x3F));
                         }
                         break;
                     }
                     default:
-                        parser->x.status = kParseStringInvalidEscape;
+                        parser->status = kParseStringInvalidEscape;
                         return kTokenError;
                 }
                 break;
             case '"': {
-                if (parser->sb.err) {
-                    parser->x.status = kParseNoMemory;
-                    return kTokenError;
-                }
                 // Closing double quote finishes the string.
-                struct Slice string = (struct Slice){
-                    .ptr = parser->sb.ptr,
-                    .len = parser->sb.len,
+                const struct Slice string = (struct Slice){
+                    .ptr = begin,
+                    .len = out - begin,
                 };
-                // Check to see if there were any escapes. All escapes decrease the length of the
-                // string, so we can just check if the string builder length matches the number of
-                // bytes consumed. If there were no escapes, then we don't have to allocate space
-                // to store the unescaped string.
-                JsonBool inlineStr = 0;
-                if (parser->sb.len == *ptr - begin - 1) {
-                    string.ptr = begin;
-                    inlineStr = 1;
-                }
-                docAppendString(parser, string, inlineStr);
+                docAppendString(parser, string);
                 return kTokenString;
             }
             default:
                 if ((uint8_t)c < 0x20) {
-                    parser->x.status = kParseStringUnescapedControl;
+                    parser->status = kParseStringUnescapedControl;
                     return kTokenError;
                 } else if ((uint8_t)c < 0x80) {
-                    sbAppend(sb, c);
-                } else if (scanUtf8(parser, ptr, c)) {
-                    parser->x.status = kParseStringInvalidUtf8;
+                    *out++ = c;
+                } else if (scanUtf8(ptr, &out, c)) {
+                    parser->status = kParseStringInvalidUtf8;
                     return kTokenError;
                 }
         }
     }
 }
 
-static enum Token scanReal(JsonParser *parser, const char **ptr, JsonBool isNegative)
+static enum Token scanReal(struct JsonParser *parser, const char **ptr, JsonBool isNegative)
 {
     const char *begin = *ptr - isNegative;
     // According to RFC 8259, the ABNF for a number looks like:
@@ -713,7 +509,7 @@ static enum Token scanReal(JsonParser *parser, const char **ptr, JsonBool isNega
         getChar(ptr);
         // Consume the fractional part.
         if (!ISNUMERIC(peekChar(ptr))) {
-            parser->x.status = kParseNumberMissingFraction;
+            parser->status = kParseNumberMissingFraction;
             return kTokenError;
         }
         SKIP_DIGITS
@@ -727,7 +523,7 @@ static enum Token scanReal(JsonParser *parser, const char **ptr, JsonBool isNega
             getChar(ptr);
         }
         if (!ISNUMERIC(peekChar(ptr))) {
-            parser->x.status = kParseNumberMissingExponent;
+            parser->status = kParseNumberMissingExponent;
             return kTokenError;
         }
         SKIP_DIGITS
@@ -738,7 +534,7 @@ static enum Token scanReal(JsonParser *parser, const char **ptr, JsonBool isNega
     return kTokenValue;
 }
 
-static enum Token scanNumber(JsonParser *parser, const char **ptr, JsonBool isNegative)
+static enum Token scanNumber(struct JsonParser *parser, const char **ptr, JsonBool isNegative)
 {
     const char *begin = *ptr;
     if (!ISNUMERIC(peekChar(ptr))) {
@@ -789,11 +585,11 @@ call_scan_real:
     *ptr = begin;
     return scanReal(parser, ptr, isNegative);
 return_with_error:
-    parser->x.status = kParseNumberInvalid;
+    parser->status = kParseNumberInvalid;
     return kTokenError;
 }
 
-static enum Token scanToken(JsonParser *parser, const char **ptr)
+static enum Token scanToken(struct JsonParser *parser, const char **ptr)
 {
     // skipWhitespace(parser) returns the first non-whitespace character following the last
     // token we read.
@@ -837,7 +633,7 @@ static enum Token scanToken(JsonParser *parser, const char **ptr)
         case EOF:
             return kTokenEndOfInput;
         default:
-            parser->x.status = kParseSyntaxError;
+            parser->status = kParseSyntaxError;
             return kTokenError;
     }
 }
@@ -909,18 +705,18 @@ static enum State predictState(enum State src, enum Token token)
 }
 
 MEWJSON_NODISCARD
-static enum State parserBeginContainer(JsonParser *parser, enum State nextState)
+static enum State parserBeginContainer(struct JsonParser *parser, enum State nextState)
 {
     ++parser->x.depth;
     if (parser->x.depth > MEWJSON_MAX_DEPTH) {
-        parser->x.status = kParseExceededMaxDepth;
+        parser->status = kParseExceededMaxDepth;
         return kStateError;
     }
     return nextState;
 }
 
 MEWJSON_NODISCARD
-static enum State parserEndContainer(JsonParser *parser)
+static enum State parserEndContainer(struct JsonParser *parser)
 {
     // This precondition is ensured by the state transition table in predictState(). This
     // function will never be called unless parserBeginContainer() was called at some point.
@@ -950,7 +746,7 @@ static enum State parserEndContainer(JsonParser *parser)
 }
 
 // Transition into the next state
-static enum State transitState(JsonParser *parser, enum State dst)
+static enum State transitState(struct JsonParser *parser, enum State dst)
 {
     // `dst` is the next state as predicted by predict(), upon reading token `token`.
     // We need to make sure that the destination state is not a transient state (either
@@ -973,17 +769,17 @@ static enum State transitState(JsonParser *parser, enum State dst)
     }
 }
 
-static enum Token parserAdvance(JsonParser *parser, const char **ptr)
+static enum Token parserAdvance(struct JsonParser *parser, const char **ptr)
 {
-    if (parser->x.status == kParseOk) {
+    if (parser->status == kParseOk) {
         return scanToken(parser, ptr);
     }
     return kTokenError;
 }
 
-static int parserFinish(JsonParser *parser, const char *ptr, enum State state)
+static int parserFinish(struct JsonParser *parser, const char *ptr, enum State state)
 {
-    if (parser->x.status != kParseOk) {
+    if (parser->status != kParseOk) {
         return -1;
     }
     if (parser->x.depth != 0) {
@@ -991,18 +787,18 @@ static int parserFinish(JsonParser *parser, const char *ptr, enum State state)
         // the last container has been closed, the parser transitions into the end state, a
         // sink state, and refuses to accept any more tokens.
         assert(parser->x.depth > 0);
-        parser->x.status = kParseContainerNotClosed;
+        parser->status = kParseContainerNotClosed;
         return -1;
     }
     if (state != kStateEnd || skipWhitespace(&ptr) != EOF) {
         // Non-specific syntax error.
-        parser->x.status = kParseSyntaxError;
+        parser->status = kParseSyntaxError;
         return -1;
     }
     return 0;
 }
 
-static int parserParse(JsonParser *parser, const char **ptr)
+static int parserParse(struct JsonParser *parser, const char **ptr)
 {
     enum State state = kStateBegin;
     enum Token token;
@@ -1017,33 +813,30 @@ static int parserParse(JsonParser *parser, const char **ptr)
 #define PADDING_LENGTH 4
 
 MEWJSON_NODISCARD
-JsonDocument *jsonRead(const char *input, JsonSize length, JsonParser *parser)
+JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *parser)
 {
     char *text = JSON_MALLOC(length + PADDING_LENGTH);
     JsonDocument *doc = JSON_MALLOC(sizeof(JsonDocument));
     if (!text || !doc) {
         JSON_FREE(doc);
         JSON_FREE(text);
-        parser->x.status = kParseNoMemory;
+        parser->status = kParseNoMemory;
         return NULL;
     }
     memcpy(text, input, length);
     memset(text + length, EOF, PADDING_LENGTH);
     *doc = (JsonDocument){.text = text};
-
-    // Reset temporary variables.
-    parser->sb.err = 0;
-    parser->x = (struct ParseState){
-        .doc = doc,
+    *parser = (struct JsonParser){
+        .x = (struct JsonParserPrivate){.doc = doc},
         .offset = -1,
     };
 
     // Parse the document.
     const char *ptr = text;
     parserParse(parser, &ptr);
-    parser->x.offset = MIN(length, ptr - text);
+    parser->offset = MIN(length, ptr - text);
 
-    if (parser->x.status != kParseOk) {
+    if (parser->status != kParseOk) {
         jsonDestroyDocument(doc);
         doc = NULL;
     }
@@ -1257,7 +1050,8 @@ const char *jsonCursorKey(struct JsonCursor *c, JsonSize *length)
     return key->v.string;
 }
 
-MEWJSON_NODISCARD JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
+MEWJSON_NODISCARD
+JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
 {
     struct Writer w = {
         .ptr = buffer,
@@ -1377,44 +1171,10 @@ JsonValue *jsonRoot(JsonDocument *doc)
 void jsonDestroyDocument(JsonDocument *doc)
 {
     if (doc) {
-        for (char *p = doc->longStr; p;) {
-            // Free strings that were too long to fit in an arena. They are linked together so
-            // that we don't have to traverse the document to find them.
-            assert(p[-1] == STRING_EXTERN_TAG);
-            char **hdr = (char **)(p - 1) - 1;
-            p = hdr[0]; // Get next char *
-            JSON_FREE(hdr);
-        }
-        poolDestroy(&doc->strPool);
         JSON_FREE(doc->values);
         JSON_FREE(doc->text);
         JSON_FREE(doc);
     }
-}
-
-JsonParser *jsonCreateParser(void)
-{
-    JsonParser *parser = JSON_MALLOC(SIZEOF(JsonParser));
-    if (parser) {
-        *parser = (JsonParser){0};
-    }
-    return parser;
-}
-
-void jsonDestroyParser(JsonParser *parser)
-{
-    JSON_FREE(parser->sb.ptr); // String builder buffer
-    JSON_FREE(parser);
-}
-
-enum JsonParseStatus jsonLastStatus(const JsonParser *parser)
-{
-    return parser->x.status;
-}
-
-JsonSize jsonLastOffset(const JsonParser *parser)
-{
-    return parser->x.offset;
 }
 
 JsonSize jsonObjectFind(JsonValue *obj, const char *key, JsonSize length)
@@ -1494,12 +1254,12 @@ static JsonSize decodeArrayIndex(struct Slice ptr)
             }
         }
         index = index * 10 + NUMVAL(c);
-        sliceAdvance(&ptr, 1);
+        sliceAdvance(&ptr);
     }
     return index;
 }
 
-enum JsonQueryStatus findNextValue(JsonValue **val, struct Slice ptr)
+static enum JsonQueryStatus findNextValue(JsonValue **val, struct Slice ptr)
 {
     if (!ISCONTAINER(jsonType(*val))) {
         return kQueryNotFound;
@@ -1518,38 +1278,98 @@ enum JsonQueryStatus findNextValue(JsonValue **val, struct Slice ptr)
     return *val ? kQueryOk : kQueryNotFound;
 }
 
-MEWJSON_NODISCARD
-int processPtrToken(struct StringBuilder *sb, struct Slice *ptr)
+// Scratch memory for unescaping JSON pointers
+struct PathBuilder {
+    char *ptr;
+    JsonSize len;
+    JsonSize cap;
+    JsonBool err;
+
+#define PB_SMALL_LENGTH 256
+    // Start out writing to this buffer. If the path gets too long, switch to a heap-allocated
+    // buffer.
+    char small[PB_SMALL_LENGTH];
+};
+
+static void pbCleanup(struct PathBuilder *pb)
 {
+    if (pb->ptr != pb->small) {
+        JSON_FREE(pb->ptr);
+    }
+}
+
+MEWJSON_NODISCARD
+static JsonBool pbEnsureSpace(struct PathBuilder *pb)
+{
+    if (pb->err) {
+        return 0;
+    }
+    const JsonSize len = pb->len + 1;
+    if (len > pb->cap) {
+        if (pb->cap == 0) {
+            pb->cap = PB_SMALL_LENGTH;
+            pb->ptr = pb->small;
+            return 1;
+        }
+        JsonSize cap = 4;
+        while (cap < len) {
+            cap *= 2;
+        }
+        char *ptr = JSON_MALLOC(cap);
+        if (!ptr) {
+            pb->err = 1;
+            return 0;
+        }
+        memcpy(ptr, pb->ptr, pb->len);
+        if (pb->ptr != pb->small) {
+            JSON_FREE(pb->ptr);
+        }
+        pb->ptr = ptr;
+        pb->cap = cap;
+    }
+    return 1;
+}
+
+static void pbAppend(struct PathBuilder *pb, char c)
+{
+    if (pbEnsureSpace(pb)) {
+        pb->ptr[pb->len] = c;
+        ++pb->len;
+    }
+}
+
+MEWJSON_NODISCARD
+static int processPtrToken(struct PathBuilder *pb, struct Slice *ptr)
+{
+    assert(pb->len == 0);
     assert(ptr->len > 0);
     assert(ptr->ptr[0] == '/');
-    sb->len = 0;
 
     // Skip the '/'
-    sliceAdvance(ptr, 1);
+    sliceAdvance(ptr);
 
     // Find the next '/' and unescape the current token
     while (ptr->len > 0) {
         if (ptr->ptr[0] == '/') {
             break;
         } else if (ptr->ptr[0] == '~') {
-            sliceAdvance(ptr, 1);
+            sliceAdvance(ptr);
             if (ptr->len == 0) {
                 // Missing char after '~'
                 return -1;
             }
             if (ptr->ptr[0] == '0') {
-                sbAppend(sb, '~');
+                pbAppend(pb, '~');
             } else if (ptr->ptr[0] == '1') {
-                sbAppend(sb, '/');
+                pbAppend(pb, '/');
             } else {
                 // Missing '0' or '1' after '~'
                 return -1;
             }
         } else {
-            sbAppend(sb, ptr->ptr[0]);
+            pbAppend(pb, ptr->ptr[0]);
         }
-        sliceAdvance(ptr, 1);
+        sliceAdvance(ptr);
     }
     return 0;
 }
@@ -1657,7 +1477,7 @@ enum JsonQueryStatus jsonFind(JsonValue *root, const char *jsonPtr, JsonSize ptr
 {
     struct Slice ptr = SLICE_NEW(jsonPtr, ptrSize);
     enum JsonQueryStatus rc = kQueryOk;
-    struct StringBuilder sb = {0};
+    struct PathBuilder pb = {0};
     *result = NULL;
     if (ptr.len == 0) {
         // Empty path means the root node.
@@ -1666,12 +1486,13 @@ enum JsonQueryStatus jsonFind(JsonValue *root, const char *jsonPtr, JsonSize ptr
         return kQueryPathInvalid;
     }
     do {
-        if (processPtrToken(&sb, &ptr)) {
+        pb.len = 0; // Reset path builder
+        if (processPtrToken(&pb, &ptr)) {
             rc = kQueryPathInvalid;
-        } else if (sb.err) {
+        } else if (pb.err) {
             rc = kQueryNoMemory;
         } else {
-            rc = findNextValue(&root, SLICE_NEW(sb.ptr, sb.len));
+            rc = findNextValue(&root, SLICE_NEW(pb.ptr, pb.len));
         }
     } while (ptr.len > 0 && rc == kQueryOk);
 
@@ -1679,6 +1500,6 @@ finish:
     if (rc == kQueryOk) {
         *result = root;
     }
-    JSON_FREE(sb.ptr);
+    pbCleanup(&pb);
     return rc;
 }

@@ -298,93 +298,93 @@ static const char *kNoTestNames[] = {
 };
 
 static const char *kYesTestNames[] = {
-    //    "y_array_arraysWithSpaces",
-    //    "y_array_empty-string",
-    //    "y_array_empty",
-    //    "y_array_ending_with_newline",
-    //    "y_array_false",
-    //    "y_array_heterogeneous",
-    //    "y_array_null",
-    //    "y_array_with_1_and_newline",
-    //    "y_array_with_leading_space",
-    //    "y_array_with_several_null",
-    //    "y_array_with_trailing_space",
-    //    "y_number",
-    //    "y_number_0e+1",
-    //    "y_number_0e1",
-    //    "y_number_after_space",
-    //    "y_number_double_close_to_zero",
-    //    "y_number_int_with_exp",
-    //    "y_number_minus_zero",
-    //    "y_number_negative_int",
-    //    "y_number_negative_one",
-    //    "y_number_negative_zero",
-    //    "y_number_real_capital_e",
-    //    "y_number_real_capital_e_neg_exp",
-    //    "y_number_real_capital_e_pos_exp",
-    //    "y_number_real_exponent",
-    //    "y_number_real_fraction_exponent",
-    //    "y_number_real_neg_exp",
-    //    "y_number_real_pos_exponent",
-    //    "y_number_simple_int",
-    //    "y_number_simple_real",
-    //    "y_object",
-    //    "y_object_basic",
-    //    "y_object_duplicated_key",
-    //    "y_object_duplicated_key_and_value",
-    //    "y_object_empty",
-    //    "y_object_empty_key",
-    //    "y_object_escaped_null_in_key",
-    //    "y_object_extreme_numbers",
-    //    "y_object_long_strings",
-    //    "y_object_simple",
-    //    "y_object_string_unicode",
-    //    "y_object_with_newlines",
-    //    "y_string_1_2_3_bytes_UTF-8_sequences",
-    //    "y_string_accepted_surrogate_pair",
-    //    "y_string_accepted_surrogate_pairs",
-    //    "y_string_allowed_escapes",
-    //    "y_string_backslash_and_u_escaped_zero",
-    //    "y_string_backslash_doublequotes",
-    //    "y_string_comments",
-    //    "y_string_double_escape_a",
-    //    "y_string_double_escape_n",
-    //    "y_string_escaped_control_character",
-    //    "y_string_escaped_noncharacter",
-    //    "y_string_in_array",
-    //    "y_string_in_array_with_leading_space",
-    //    "y_string_last_surrogates_1_and_2",
-    //    "y_string_nbsp_uescaped",
-    //    "y_string_nonCharacterInUTF-8_U+10FFFF",
-    //    "y_string_nonCharacterInUTF-8_U+FFFF",
-    //    "y_string_null_escape",
-    //    "y_string_one-byte-utf-8",
-    //    "y_string_pi",
-    //    "y_string_reservedCharacterInUTF-8_U+1BFFF",
-    //    "y_string_simple_ascii",
-    //    "y_string_space",
-    //    "y_string_surrogates_U+1D11E_MUSICAL_SYMBOL_G_CLEF",
-    //    "y_string_three-byte-utf-8",
-    //    "y_string_two-byte-utf-8",
-    //    "y_string_u+2028_line_sep",
-    //    "y_string_u+2029_par_sep",
-    //    "y_string_uEscape",
-    //    "y_string_uescaped_newline",
-    //    "y_string_unescaped_char_delete",
-    //    "y_string_unicode",
-    //    "y_string_unicodeEscapedBackslash",
-    //    "y_string_unicode_2",
-    //    "y_string_unicode_U+10FFFE_nonchar",
-    //    "y_string_unicode_U+1FFFE_nonchar",
-    //    "y_string_unicode_U+200B_ZERO_WIDTH_SPACE",
-    //    "y_string_unicode_U+2064_invisible_plus",
-    //    "y_string_unicode_U+FDD0_nonchar",
-    //    "y_string_unicode_U+FFFE_nonchar",
-    //    "y_string_unicode_escaped_double_quote",
-    //    "y_string_utf8",
-    //    "y_string_with_del_character",
-    //    "y_structure_lonely_false",
-    //    "y_structure_lonely_int",
+    "y_array_arraysWithSpaces",
+    "y_array_empty-string",
+    "y_array_empty",
+    "y_array_ending_with_newline",
+    "y_array_false",
+    "y_array_heterogeneous",
+    "y_array_null",
+    "y_array_with_1_and_newline",
+    "y_array_with_leading_space",
+    "y_array_with_several_null",
+    "y_array_with_trailing_space",
+    "y_number",
+    "y_number_0e+1",
+    "y_number_0e1",
+    "y_number_after_space",
+    "y_number_double_close_to_zero",
+    "y_number_int_with_exp",
+    "y_number_minus_zero",
+    "y_number_negative_int",
+    "y_number_negative_one",
+    "y_number_negative_zero",
+    "y_number_real_capital_e",
+    "y_number_real_capital_e_neg_exp",
+    "y_number_real_capital_e_pos_exp",
+    "y_number_real_exponent",
+    "y_number_real_fraction_exponent",
+    "y_number_real_neg_exp",
+    "y_number_real_pos_exponent",
+    "y_number_simple_int",
+    "y_number_simple_real",
+    "y_object",
+    "y_object_basic",
+    "y_object_duplicated_key",
+    "y_object_duplicated_key_and_value",
+    "y_object_empty",
+    "y_object_empty_key",
+    "y_object_escaped_null_in_key",
+    "y_object_extreme_numbers",
+    "y_object_long_strings",
+    "y_object_simple",
+    "y_object_string_unicode",
+    "y_object_with_newlines",
+    "y_string_1_2_3_bytes_UTF-8_sequences",
+    "y_string_accepted_surrogate_pair",
+    "y_string_accepted_surrogate_pairs",
+    "y_string_allowed_escapes",
+    "y_string_backslash_and_u_escaped_zero",
+    "y_string_backslash_doublequotes",
+    "y_string_comments",
+    "y_string_double_escape_a",
+    "y_string_double_escape_n",
+    "y_string_escaped_control_character",
+    "y_string_escaped_noncharacter",
+    "y_string_in_array",
+    "y_string_in_array_with_leading_space",
+    "y_string_last_surrogates_1_and_2",
+    "y_string_nbsp_uescaped",
+    "y_string_nonCharacterInUTF-8_U+10FFFF",
+    "y_string_nonCharacterInUTF-8_U+FFFF",
+    "y_string_null_escape",
+    "y_string_one-byte-utf-8",
+    "y_string_pi",
+    "y_string_reservedCharacterInUTF-8_U+1BFFF",
+    "y_string_simple_ascii",
+    "y_string_space",
+    "y_string_surrogates_U+1D11E_MUSICAL_SYMBOL_G_CLEF",
+    "y_string_three-byte-utf-8",
+    "y_string_two-byte-utf-8",
+    "y_string_u+2028_line_sep",
+    "y_string_u+2029_par_sep",
+    "y_string_uEscape",
+    "y_string_uescaped_newline",
+    "y_string_unescaped_char_delete",
+    "y_string_unicode",
+    "y_string_unicodeEscapedBackslash",
+    "y_string_unicode_2",
+    "y_string_unicode_U+10FFFE_nonchar",
+    "y_string_unicode_U+1FFFE_nonchar",
+    "y_string_unicode_U+200B_ZERO_WIDTH_SPACE",
+    "y_string_unicode_U+2064_invisible_plus",
+    "y_string_unicode_U+FDD0_nonchar",
+    "y_string_unicode_U+FFFE_nonchar",
+    "y_string_unicode_escaped_double_quote",
+    "y_string_utf8",
+    "y_string_with_del_character",
+    "y_structure_lonely_false",
+    "y_structure_lonely_int",
     "y_structure_lonely_negative_real",
     "y_structure_lonely_null",
     "y_structure_lonely_string",
@@ -538,7 +538,7 @@ static void testcaseInit(const char *name)
     puts(name);
 }
 
-static void attemptRoundtrip(JsonParser *parser, JsonDocument **doc)
+static void attemptRoundtrip(struct JsonParser *parser, JsonDocument **doc)
 {
     JsonValue *v1 = jsonRoot(*doc);
 
@@ -574,20 +574,18 @@ static void testcaseRun(struct Testcase *tc)
 {
     testcaseInit(tc->name);
 
-    JsonParser *parser = jsonCreateParser();
-    JsonDocument *doc = jsonRead(tc->input, tc->inputLen, parser);
-    const enum JsonParseStatus e = jsonLastStatus(parser);
+    struct JsonParser parser;
+    JsonDocument *doc = jsonRead(tc->input, tc->inputLen, &parser);
     if (tc->type == kTestcaseNo) {
         // Must fail for a reason other than running out of memory. OOM conditions are tested
         // separately (see TestcaseReaderOom()).
-        CHECK(e != kParseNoMemory);
+        CHECK(parser.status != kParseNoMemory);
         CHECK(!doc);
-        jsonDestroyParser(parser);
         return;
     }
-    CHECK(e == kParseOk);
+    CHECK(parser.status == kParseOk);
     CHECK(doc);
-    attemptRoundtrip(parser, &doc);
+    attemptRoundtrip(&parser, &doc);
     JsonValue *v = jsonRoot(doc);
     if (tc->type == kTestcaseYesInteger) {
         CHECK(jsonType(v) == kTypeInteger);
@@ -597,7 +595,6 @@ static void testcaseRun(struct Testcase *tc)
         CHECK(areRealsEqual(jsonReal(v), tc->value.real));
     }
     jsonDestroyDocument(doc);
-    jsonDestroyParser(parser);
 }
 
 static void testcaseLargeNumbers()
@@ -605,9 +602,9 @@ static void testcaseLargeNumbers()
     testcaseInit("large_numbers");
     static const char kText[] = "[-1e1111,1e1111]";
 
-    JsonParser *parser = jsonCreateParser();
-    JsonDocument *doc = jsonRead(kText, (JsonSize)strlen(kText), parser);
-    CHECK(jsonLastStatus(parser) == kParseOk);
+    struct JsonParser parser;
+    JsonDocument *doc = jsonRead(kText, (JsonSize)strlen(kText), &parser);
+    CHECK(parser.status == kParseOk);
     CHECK(doc);
 
     JsonValue *arr = jsonRoot(doc);
@@ -623,8 +620,8 @@ static void testcaseLargeNumbers()
     CHECK(n > 0);
     jsonDestroyDocument(doc);
 
-    doc = jsonRead(buffer, n, parser);
-    CHECK(jsonLastStatus(parser) == kParseOk);
+    doc = jsonRead(buffer, n, &parser);
+    CHECK(parser.status == kParseOk);
     CHECK(doc);
 
     // Overflowing real numbers are written as nulls.
@@ -634,7 +631,6 @@ static void testcaseLargeNumbers()
     CHECK(jsonType(a) == kTypeNull);
     CHECK(jsonType(b) == kTypeNull);
 
-    jsonDestroyParser(parser);
     jsonDestroyDocument(doc);
 }
 
@@ -648,32 +644,12 @@ static void testcaseExceedMaxDepth()
     }
     buffer[kDepth] = '\0';
 
-    JsonParser *parser = jsonCreateParser();
-    JsonDocument *doc = jsonRead(buffer, (JsonSize)strlen(buffer), parser);
-    CHECK(jsonLastStatus(parser) == kParseExceededMaxDepth);
+    struct JsonParser parser;
+    JsonDocument *doc = jsonRead(buffer, (JsonSize)strlen(buffer), &parser);
+    CHECK(parser.status == kParseExceededMaxDepth);
     CHECK(!doc);
-    jsonDestroyParser(parser);
     leakCheckFree(buffer);
 }
-
-const char *kExampleText = "  {               "
-                           "      \"a\": 1,   "
-                           "      \"b\": {},  "
-                           "      \"c\": [    "
-                           "          1,      "
-                           "          [       "
-                           "              2,  "
-                           "              3   "
-                           "          ],      "
-                           "          4       "
-                           "      ],          "
-                           "      \"d\": [    "
-                           "          true,   "
-                           "          \"\",   "
-                           "          1.23,   "
-                           "          null    "
-                           "      ]           "
-                           "  }               ";
 
 // Make sure the parser stops at the end of the input buffer. For this test to work
 // properly, we have to make sure that strtod() doesn't run past the section of
@@ -687,15 +663,14 @@ static void testcaseDigitsPastEndOfInput()
     };
     const char kText[] = "0.23456789";
 
-    JsonParser *parser = jsonCreateParser();
+    struct JsonParser parser;
     for (JsonSize i = 3; i < 10; ++i) {
-        JsonDocument *doc = jsonRead(kText, i, parser);
-        CHECK(jsonLastStatus(parser) == kParseOk);
+        JsonDocument *doc = jsonRead(kText, i, &parser);
+        CHECK(parser.status == kParseOk);
         CHECK(doc);
         CHECK(areRealsEqual(jsonReal(jsonRoot(doc)), kResult[i - 3]));
         jsonDestroyDocument(doc);
     }
-    jsonDestroyParser(parser);
 }
 
 static void testcaseParseErrors()
@@ -727,13 +702,12 @@ static void testcaseParseErrors()
         {kParseSyntaxError, " "},
     };
 
-    JsonParser *parser = jsonCreateParser();
+    struct JsonParser parser;
     for (JsonSize i = 0; i < COUNTOF(kInputs); ++i) {
-        CHECK(!jsonRead(kInputs[i].text, (JsonSize)strlen(kInputs[i].text), parser));
-        CHECK(jsonLastStatus(parser) == kInputs[i].reason);
-        CHECK(!jsonLastOffset(parser) == kInputs[i].zeroOffset);
+        CHECK(!jsonRead(kInputs[i].text, (JsonSize)strlen(kInputs[i].text), &parser));
+        CHECK(parser.status == kInputs[i].reason);
+        CHECK(!parser.offset == kInputs[i].zeroOffset);
     }
-    jsonDestroyParser(parser);
 }
 
 static char *readFileToString(const char *pathname, JsonSize *lengthOut)
