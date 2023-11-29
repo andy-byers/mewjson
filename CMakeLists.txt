@@ -16,14 +16,18 @@ endif()
 option(MEWJSON_BuildFuzzers "Build the fuzz targets" Off)
 option(MEWJSON_BuildTests "Build the tests" ${MAIN_PROJECT})
 
+add_library(mewjson_warnings INTERFACE)
+target_compile_options(mewjson_warnings
+        INTERFACE -Wall -Werror -Wextra -Wpedantic)
+
 add_library(mewjson STATIC)
 target_sources(mewjson
         PRIVATE mewjson.c
         PUBLIC mewjson.h)
 target_include_directories(mewjson
         PUBLIC ${PROJECT_SOURCE_DIR})
-target_compile_options(mewjson
-        PRIVATE -Wall -Werror -Wextra -Wpedantic)
+target_link_libraries(mewjson
+        PRIVATE mewjson_warnings)
 
 if(MEWJSON_BuildFuzzers)
     add_subdirectory(fuzz)
@@ -34,6 +38,3 @@ if(MEWJSON_BuildTests)
     enable_testing()
     add_subdirectory(test)
 endif()
-
-
-add_subdirectory(perf)

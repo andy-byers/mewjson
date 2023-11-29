@@ -307,7 +307,7 @@ static void testcaseArrayGet()
             // Check the first member value.
             val = jsonContainerGet(val, 0);
             CHECK(jsonType(val) == kTypeString);
-            CHECK(jsonLength(val) == strlen(kElements[i]));
+            CHECK(jsonLength(val) == (JsonSize)strlen(kElements[i]));
             CHECK(0 == memcmp(jsonString(val), kElements[i], jsonLength(val)));
         } else {
             CHECK(jsonType(val) == kTypeNull);

@@ -4,7 +4,7 @@ function(build_test NAME)
     target_link_libraries(${NAME}
             PRIVATE mewjson)
     target_link_libraries(${NAME}
-            PRIVATE mewjson)
+            PRIVATE mewjson mewjson_warnings)
     add_test(NAME ${NAME}
             COMMAND ${NAME})
 endfunction()
