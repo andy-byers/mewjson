@@ -82,10 +82,8 @@ void jsonDestroyDocument(JsonDocument *doc);
 // Build an in-memory representation of a JSON document
 // Returns a pointer to JsonDocument representing the parsed document on success, and NULL on
 // failure. The reason for failure can be queried by calling jsonGetError() on the parser. The
-// input buffer does not need to be null-terminated. It must remain valid for as long as the
-// returned JsonDocument is alive, however (the document stores pointers into the buffer for
-// strings without any escaped characters). jsonDestroyDocument() must be called on the returned
-// document when it is no longer needed.
+// input buffer does not need to be null-terminated. jsonDestroyDocument() must be called on 
+// the returned document when it is no longer needed.
 MEWJSON_NODISCARD
 JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *parser);
 
