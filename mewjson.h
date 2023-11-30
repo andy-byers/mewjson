@@ -150,22 +150,23 @@ JsonSize jsonObjectFind(JsonValue *obj, const char *key, JsonSize length);
 JsonValue *jsonContainerGet(JsonValue *container, JsonSize index);
 
 // Determines the behavior of a cursor during traversal
+// kCursorNormal visits the immediate children of a container node, and kCursorRecursive
+// visits all nodes rooted at the target node, including the target node itself.
 // The following examples show how each mode behaves. The numbers indicate the order in
 // which the various JSON values are encountered. Each example assumes that the cursor is
 // started on the root value: an array in the first case and an integer in the second.
-//  Document  | kCursorNormal | kCursorRecursive
-// -----------|---------------|------------------
-//   [        |               | 1
-//     "a",   | 1             | 2
-//     [      | 2             | 3
-//       true |               | 4
-//     ]      |               |
-//   ]        |               |
+//  Document  | kCursorNormal | kCursorRecursive | Node
+// -----------|---------------|------------------|--------------
+//   [        |               | 1                | [...]
+//     "a",   | 1             | 2                | "a"
+//     [      | 2             | 3                | [...]
+//       true |               | 4                | true
+//     ]      |               |                  |
+//   ]        |               |                  |
 //
-//  Document  | kCursorNormal | kCursorRecursive
-// -----------|---------------|------------------
-//   42       |               | 1
-
+//  Document  | kCursorNormal | kCursorRecursive | Node
+// -----------|---------------|------------------|--------------
+//   42       |               | 1                | 42
 enum JsonCursorMode {
     kCursorNormal,
     kCursorRecursive,

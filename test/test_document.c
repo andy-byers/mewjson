@@ -1,4 +1,5 @@
 #include "test.h"
+#include <inttypes.h>
 #include <string.h>
 
 static int sOomCounter = -1;
@@ -26,6 +27,55 @@ static void *testRealloc(void *ptr, size_t size)
 static void testFree(void *ptr)
 {
     leakCheckFree(ptr);
+}
+
+// Scratch memory for unescaping JSON pointers
+struct StringBuilder {
+    char *ptr;
+    JsonSize len;
+    JsonSize cap;
+};
+
+static void sbEnsureSpace(struct StringBuilder *sb, JsonSize addedLen)
+{
+    const JsonSize len = sb->len + addedLen;
+    if (len > sb->cap) {
+        JsonSize cap = 4;
+        while (cap < len) {
+            cap *= 2;
+        }
+        char *ptr = realloc(sb->ptr, cap);
+        CHECK(ptr);
+        sb->ptr = ptr;
+        sb->cap = cap;
+    }
+}
+
+static void sbAppendChar(struct StringBuilder *sb, char c)
+{
+    sbEnsureSpace(sb, 1);
+    sb->ptr[sb->len] = c;
+    ++sb->len;
+}
+
+static void sbAppendSlice(struct StringBuilder *sb, const char *ptr, JsonSize len)
+{
+    sbEnsureSpace(sb, len);
+    memcpy(sb->ptr + sb->len, ptr, len);
+    sb->len += len;
+}
+
+static void sbAppendString(struct StringBuilder *sb, const char *str)
+{
+    const JsonSize length = (JsonSize)strlen(str);
+    sbAppendSlice(sb, str, length);
+}
+
+static const char *sbFinish(struct StringBuilder *sb)
+{
+    sbAppendChar(sb, '\0');
+    sb->len = 0;
+    return sb->ptr;
 }
 
 static void testcaseInit(const char *name)
@@ -211,16 +261,65 @@ static const char kQueryExample[] =
     "    ]"
     "}}";
 
-typedef void (*EachCallback)(JsonValue *, JsonValue *);
-
-static void testForEachValue(JsonValue *root, EachCallback callback)
+static const char *testRender(JsonValue *root, struct StringBuilder *sb, enum JsonCursorMode mode)
 {
+    char scratch[32];
     struct JsonCursor c;
-    jsonCursorInit(root, kCursorRecursive, &c);
+    jsonCursorInit(root, mode, &c);
     while (jsonCursorIsValid(&c)) {
-        callback(root, c.value);
+        JsonSize keyLen;
+        const char *key = jsonCursorKey(&c, &keyLen);
+        if (key) {
+            sbAppendString(sb, "<k:");
+            sbAppendSlice(sb, key, keyLen);
+            sbAppendChar(sb, '>');
+        }
+        switch (jsonType(c.value)) {
+            case kTypeString:
+                sbAppendString(sb, "<s:");
+                sbAppendSlice(sb, jsonString(c.value), jsonLength(c.value));
+                sbAppendChar(sb, '>');
+                break;
+            case kTypeInteger:
+                snprintf(scratch, SIZEOF(scratch), "%" PRId64, jsonInteger(c.value));
+                sbAppendString(sb, "<i:");
+                sbAppendString(sb, scratch);
+                sbAppendChar(sb, '>');
+                break;
+            case kTypeReal:
+                snprintf(scratch, SIZEOF(scratch), "%g", jsonReal(c.value));
+                sbAppendString(sb, "<r:");
+                sbAppendString(sb, scratch);
+                sbAppendChar(sb, '>');
+                break;
+            case kTypeBoolean:
+                sbAppendChar(sb, '<');
+                sbAppendString(sb, jsonBoolean(c.value) ? "true" : "false");
+                sbAppendChar(sb, '>');
+                break;
+            case kTypeNull:
+                sbAppendString(sb, "<null>");
+                break;
+            default:
+                snprintf(scratch, SIZEOF(scratch), "%ld", jsonLength(c.value));
+                sbAppendChar(sb, '<');
+                sbAppendChar(sb, "ao"[jsonType(c.value) == kTypeObject]);
+                sbAppendChar(sb, ':');
+                sbAppendString(sb, scratch);
+                sbAppendChar(sb, '>');
+                break;
+        }
         jsonCursorNext(&c);
     }
+    return sbFinish(sb);
+}
+
+static void testCheckIteration(JsonValue *root, const char *result, enum JsonCursorMode mode)
+{
+    struct StringBuilder sb = {0};
+    const char *render = testRender(root, &sb, mode);
+    CHECK(0 == strcmp(render, result));
+    free(sb.ptr);
 }
 
 static JsonDocument *createTestDocument(const char *text)
@@ -294,39 +393,8 @@ static void testcaseCursorContainerRoot()
 {
     testcaseInit("cursor_container_root");
     JsonDocument *doc = createTestDocument("[42,[true]]");
-    JsonValue *root = jsonRoot(doc);
-
-    struct JsonCursor c;
-    jsonCursorInit(root, kCursorNormal, &c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeInteger);
-    CHECK(jsonInteger(c.value) == 42);
-    jsonCursorNext(&c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeArray);
-    CHECK(jsonLength(c.value) == 1);
-    jsonCursorNext(&c);
-    CHECK(!jsonCursorIsValid(&c));
-
-    jsonCursorInit(root, kCursorRecursive, &c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeArray);
-    CHECK(jsonLength(c.value) == 2);
-    jsonCursorNext(&c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeInteger);
-    CHECK(jsonInteger(c.value) == 42);
-    jsonCursorNext(&c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeArray);
-    CHECK(jsonLength(c.value) == 1);
-    jsonCursorNext(&c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeBoolean);
-    CHECK(jsonBoolean(c.value));
-    jsonCursorNext(&c);
-    CHECK(!jsonCursorIsValid(&c));
-
+    testCheckIteration(jsonRoot(doc), "<a:2><i:42><a:1><true>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "<i:42><a:1>", kCursorNormal);
     jsonDestroyDocument(doc);
 }
 
@@ -334,45 +402,32 @@ static void testcaseCursorNonContainerRoot()
 {
     testcaseInit("cursor_non_container_root");
     JsonDocument *doc = createTestDocument("42");
-    JsonValue *root = jsonRoot(doc);
-
-    struct JsonCursor c;
-    jsonCursorInit(root, kCursorNormal, &c);
-    CHECK(!jsonCursorIsValid(&c));
-
-    jsonCursorInit(root, kCursorRecursive, &c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeInteger);
-    CHECK(jsonInteger(c.value) == 42);
-
+    testCheckIteration(jsonRoot(doc), "<i:42>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "", kCursorNormal);
     jsonDestroyDocument(doc);
 }
 
-static void testcaseCursorRecursive()
+static void testcaseCursorNested()
 {
-    testcaseInit("cursor_recursive");
-    JsonDocument *doc = createTestDocument("[[[{\"a\":1}],2,3],4,[5,[{\"b\":6},"
-                                           "[7]],[8],{\"c\":[[9,10]]}]]");
-    JsonValue *root = jsonRoot(doc);
+    testcaseInit("cursor_nested");
+    JsonDocument *doc = createTestDocument("[[[{\"a\":1}],2,3],4,[5,[{\"b\":6},[7]],[8],"
+                                           "{\"c\":[[9,10]]}]]");
+    testCheckIteration(jsonRoot(doc),
+                       "<a:3><a:3><a:1><o:1><k:a><i:1><i:2><i:3><i:4><a:4><i:5><a:2><o:1>"
+                       "<k:b><i:6><a:1><i:7><a:1><i:8><o:1><k:c><a:1><a:2><i:9><i:10>",
+                       kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "<a:3><i:4><a:4>", kCursorNormal);
+    jsonDestroyDocument(doc);
+}
 
-    const char *keyChars = "abc";
-    int64_t integer = 1;
-
-    struct JsonCursor c;
-    jsonCursorInit(root, kCursorRecursive, &c);
-    while (jsonCursorIsValid(&c)) {
-        const char *key = jsonCursorKey(&c, NULL);
-        if (key) {
-            CHECK(key[0] == keyChars[0]);
-            ++keyChars;
-        }
-        if (jsonType(c.value) == kTypeInteger) {
-            CHECK(jsonInteger(c.value) == integer);
-            ++integer;
-        }
-        jsonCursorNext(&c);
-    }
-
+static void testcaseCursorParent()
+{
+    testcaseInit("cursor_parent");
+    JsonDocument *doc = createTestDocument("[1,2,{\"a\":{\"b\":[3,[4]]}},5,6]");
+    testCheckIteration(jsonRoot(doc),
+                       "<a:5><i:1><i:2><o:1><k:a><o:1><k:b><a:2><i:3><a:1><i:4><i:5><i:6>",
+                       kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "<i:1><i:2><o:1><i:5><i:6>", kCursorNormal);
     jsonDestroyDocument(doc);
 }
 
@@ -391,7 +446,8 @@ int main()
     testcaseReaderOom();
     testcaseCursorContainerRoot();
     testcaseCursorNonContainerRoot();
-    testcaseCursorRecursive();
+    testcaseCursorNested();
+    testcaseCursorParent();
     testcaseLongStrings();
 
     checkForLeaks();
