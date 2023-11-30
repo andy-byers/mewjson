@@ -467,6 +467,7 @@ static struct Testcase {
 } sInternalTestcases[] = {
 #define YES(a, b) {.name = CAT(y_, a), .input = b, .inputLen = (JsonSize)strlen(b), .type = kTestcaseYes},
     YES(structure_complicated, "[{\"a\":[{}]},{\"b\":[{\"c\":[[],[],[true]],\"d\":null}]}]")
+    YES(array_nested, "[1,[2,[3,4],5,[6,7],8],9,[10,[11,12],13,[14,15],16],17]")
 
 #define YES_INTEGER(a, b, c) {.name = CAT(y_, a), .input = b, .inputLen = (JsonSize)strlen(b), .type = kTestcaseYesInteger, .value = (union TestcaseValue){.integer = c}},
     YES_INTEGER(number_simple_int, "123", 123)

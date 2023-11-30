@@ -1,4 +1,5 @@
 #include "test.h"
+#include <inttypes.h>
 #include <string.h>
 
 static int sOomCounter = -1;
@@ -26,6 +27,55 @@ static void *testRealloc(void *ptr, size_t size)
 static void testFree(void *ptr)
 {
     leakCheckFree(ptr);
+}
+
+// Scratch memory for unescaping JSON pointers
+struct StringBuilder {
+    char *ptr;
+    JsonSize len;
+    JsonSize cap;
+};
+
+static void sbEnsureSpace(struct StringBuilder *sb, JsonSize addedLen)
+{
+    const JsonSize len = sb->len + addedLen;
+    if (len > sb->cap) {
+        JsonSize cap = 4;
+        while (cap < len) {
+            cap *= 2;
+        }
+        char *ptr = realloc(sb->ptr, cap);
+        CHECK(ptr);
+        sb->ptr = ptr;
+        sb->cap = cap;
+    }
+}
+
+static void sbAppendChar(struct StringBuilder *sb, char c)
+{
+    sbEnsureSpace(sb, 1);
+    sb->ptr[sb->len] = c;
+    ++sb->len;
+}
+
+static void sbAppendSlice(struct StringBuilder *sb, const char *ptr, JsonSize len)
+{
+    sbEnsureSpace(sb, len);
+    memcpy(sb->ptr + sb->len, ptr, len);
+    sb->len += len;
+}
+
+static void sbAppendString(struct StringBuilder *sb, const char *str)
+{
+    const JsonSize length = (JsonSize)strlen(str);
+    sbAppendSlice(sb, str, length);
+}
+
+static const char *sbFinish(struct StringBuilder *sb)
+{
+    sbAppendChar(sb, '\0');
+    sb->len = 0;
+    return sb->ptr;
 }
 
 static void testcaseInit(const char *name)
@@ -211,42 +261,65 @@ static const char kQueryExample[] =
     "    ]"
     "}}";
 
-static JsonValue *testFind(JsonValue *root, const char *jsonPtr)
+static const char *testRender(JsonValue *root, struct StringBuilder *sb, enum JsonCursorMode mode)
 {
-    JsonValue *val;
-    CHECK(kQueryOk == jsonFind(root, jsonPtr, (JsonSize)strlen(jsonPtr), &val));
-
-    static char location[8192];
-    const JsonSize len = jsonLocate(root, location, SIZEOF(location), val);
-    CHECK(len >= 0 && len <= SIZEOF(location));
-    CHECK(0 == memcmp(jsonPtr, location, len));
-    return val;
-}
-
-static void testDoNotFind(JsonValue *root, const char *jsonPtr)
-{
-    JsonValue *val;
-    CHECK(kQueryNotFound == jsonFind(root, jsonPtr, (JsonSize)strlen(jsonPtr), &val));
-    CHECK(!val);
-}
-
-static void testInvalidPointer(JsonValue *root, const char *jsonPtr)
-{
-    JsonValue *val;
-    CHECK(kQueryPathInvalid == jsonFind(root, jsonPtr, (JsonSize)strlen(jsonPtr), &val));
-    CHECK(!val);
-}
-
-typedef void (*EachCallback)(JsonValue *, JsonValue *);
-
-static void testForEachValue(JsonValue *root, EachCallback callback)
-{
+    char scratch[32];
     struct JsonCursor c;
-    jsonCursorInit(root, kCursorRecursive, &c);
+    jsonCursorInit(root, mode, &c);
     while (jsonCursorIsValid(&c)) {
-        callback(root, c.value);
+        JsonSize keyLen;
+        const char *key = jsonCursorKey(&c, &keyLen);
+        if (key) {
+            sbAppendString(sb, "<k:");
+            sbAppendSlice(sb, key, keyLen);
+            sbAppendChar(sb, '>');
+        }
+        switch (jsonType(c.value)) {
+            case kTypeString:
+                sbAppendString(sb, "<s:");
+                sbAppendSlice(sb, jsonString(c.value), jsonLength(c.value));
+                sbAppendChar(sb, '>');
+                break;
+            case kTypeInteger:
+                snprintf(scratch, SIZEOF(scratch), "%" PRId64, jsonInteger(c.value));
+                sbAppendString(sb, "<i:");
+                sbAppendString(sb, scratch);
+                sbAppendChar(sb, '>');
+                break;
+            case kTypeReal:
+                snprintf(scratch, SIZEOF(scratch), "%g", jsonReal(c.value));
+                sbAppendString(sb, "<r:");
+                sbAppendString(sb, scratch);
+                sbAppendChar(sb, '>');
+                break;
+            case kTypeBoolean:
+                sbAppendChar(sb, '<');
+                sbAppendString(sb, jsonBoolean(c.value) ? "true" : "false");
+                sbAppendChar(sb, '>');
+                break;
+            case kTypeNull:
+                sbAppendString(sb, "<null>");
+                break;
+            default:
+                snprintf(scratch, SIZEOF(scratch), "%ld", jsonLength(c.value));
+                sbAppendChar(sb, '<');
+                sbAppendChar(sb, "ao"[jsonType(c.value) == kTypeObject]);
+                sbAppendChar(sb, ':');
+                sbAppendString(sb, scratch);
+                sbAppendChar(sb, '>');
+                break;
+        }
         jsonCursorNext(&c);
     }
+    return sbFinish(sb);
+}
+
+static void testCheckIteration(JsonValue *root, const char *result, enum JsonCursorMode mode)
+{
+    struct StringBuilder sb = {0};
+    const char *render = testRender(root, &sb, mode);
+    CHECK(0 == strcmp(render, result));
+    free(sb.ptr);
 }
 
 static JsonDocument *createTestDocument(const char *text)
@@ -316,265 +389,12 @@ static void testcaseArrayGet()
     jsonDestroyDocument(doc);
 }
 
-static void testCheckLocations(JsonValue *root, JsonValue *value)
-{
-    char pointer[4096];
-    // Determine the JSON pointer that refers to the target value, relative to the given root.
-    const JsonSize length = jsonLocate(root, NULL, 0, value);
-    CHECK(length >= 0 && length < SIZEOF(pointer));
-    CHECK(length == jsonLocate(root, pointer, SIZEOF(pointer), value));
-
-    JsonValue *result;
-    // Make sure the generated JSON pointer can be used to find the target value again.
-    const enum JsonQueryStatus e = jsonFind(root, pointer, length, &result);
-    CHECK(e == kQueryOk);
-    CHECK(result == value);
-
-    // Roundtrip the pointer and make sure it matches.
-    char pointer2[4096];
-    CHECK(length == jsonLocate(root, pointer2, length, value));
-    CHECK(0 == memcmp(pointer, pointer2, length));
-}
-
-static void testcaseFindExistent()
-{
-    testcaseInit("find_existent");
-    JsonDocument *doc = createTestDocument(kQueryExample);
-    JsonValue *root = jsonRoot(doc);
-
-    // Check all locations in the document.
-    testForEachValue(root, testCheckLocations);
-
-    JsonValue *res = root;
-    JsonValue *val = testFind(root, "");
-    CHECK(val == res);
-
-    res = jsonContainerGet(res, 0);
-    val = testFind(root, "/menu");
-    CHECK(val == res);
-
-    res = jsonContainerGet(res, 2);
-    val = testFind(root, "/menu/items");
-    CHECK(val == res);
-
-    res = jsonContainerGet(res, 21);
-    val = testFind(root, "/menu/items/21");
-    CHECK(val == res);
-
-    res = jsonContainerGet(res, 1);
-    val = testFind(root, "/menu/items/21/label");
-    CHECK(val == res);
-    CHECK(0 == memcmp("About Adobe CVG Viewer...", jsonString(val), jsonLength(val)));
-
-    // Object members may have empty keys.
-    val = testFind(root, "/menu/"); // tokens = ("menu", "")
-    CHECK(jsonType(val) == kTypeArray);
-    CHECK(jsonLength(val) == 3);
-    val = testFind(root, "/menu//1/b/1/0"); // tokens = ("menu", "", 1, "b", 1, 0)
-    CHECK(jsonType(val) == kTypeInteger);
-    CHECK(jsonInteger(val) == 3);
-
-    jsonDestroyDocument(doc);
-}
-
-static void testcaseFindNonexistent()
-{
-    testcaseInit("find_nonexistent");
-    JsonDocument *doc = createTestDocument(kQueryExample);
-    JsonValue *root = jsonRoot(doc);
-
-    testDoNotFind(root, "/items");
-    testDoNotFind(root, "/men");
-    testDoNotFind(root, "/menu ");
-    testDoNotFind(root, "/menv");
-    testDoNotFind(root, "/menu/item");
-    testDoNotFind(root, "/menu/items ");
-    testDoNotFind(root, "/menu/iten");
-    testDoNotFind(root, "/menu/items/");
-    testDoNotFind(root, "/menu/items//id");
-    testDoNotFind(root, "/menu/items/22");
-    testDoNotFind(root, "/menu/items/-");
-    testDoNotFind(root, "/menu/items/2305843009213693951");
-    testDoNotFind(root, "/menu/items/2305843009213693952");
-    testDoNotFind(root, "/menu/items/2305843009213693953");
-    testDoNotFind(root, "/menu/items/9999999999999999999");
-    testDoNotFind(root, "/menu/header/0");
-    testDoNotFind(root, "/menu/header/nonexistent");
-
-    jsonDestroyDocument(doc);
-}
-
-static void testcaseFindRelative()
-{
-    testcaseInit("find_relative");
-    JsonDocument *doc = createTestDocument(kQueryExample);
-    // Find the array at JSON pointer "/menu/items".
-    JsonValue *root = jsonRoot(doc);
-    root = jsonContainerGet(root, 0);
-    root = jsonContainerGet(root, 2);
-    CHECK(root);
-    CHECK(jsonType(root) == kTypeArray);
-    CHECK(jsonLength(root) == 22);
-
-    // Check all locations in the array.
-    testForEachValue(root, testCheckLocations);
-
-    JsonValue *res = root;
-    JsonValue *val = testFind(root, "");
-    CHECK(val == res);
-
-    res = jsonContainerGet(res, 5);
-    val = testFind(root, "/5");
-    CHECK(val == res);
-
-    res = jsonContainerGet(res, 1);
-    val = testFind(root, "/5/label");
-    CHECK(val == res);
-    CHECK(0 == memcmp("Original View", jsonString(val), jsonLength(val)));
-
-    jsonDestroyDocument(doc);
-}
-
-static void testcaseFindScalarRoot()
-{
-    testcaseInit("find_scalar_root");
-    JsonDocument *doc = createTestDocument("123");
-    JsonValue *root = jsonRoot(doc);
-
-    testForEachValue(root, testCheckLocations);
-
-    JsonValue *val = testFind(root, "");
-    CHECK(jsonType(val) == kTypeInteger);
-    CHECK(jsonInteger(val) == 123);
-
-    testDoNotFind(root, "/0");
-    testDoNotFind(root, "/"); // Empty key token
-    testDoNotFind(root, "/key");
-
-    jsonDestroyDocument(doc);
-}
-
-static void testcaseFindWithEscapes()
-{
-    testcaseInit("find_with_escapes");
-    JsonDocument *doc = createTestDocument("{\"x~/\":{\"~/x\":{\"/x~\":{\"~1\":42}}}}");
-    JsonValue *root = jsonRoot(doc);
-
-    testForEachValue(root, testCheckLocations);
-
-    //  Before | After
-    // --------|-------
-    //  ~0     | ~
-    //  ~1     | /
-    //  ~01    | ~1
-    JsonValue *val = testFind(root, "/x~0~1/~0~1x/~1x~0/~01");
-    CHECK(jsonType(val) == kTypeInteger);
-    CHECK(jsonInteger(val) == 42);
-    jsonDestroyDocument(doc);
-}
-
-static void testcaseFindLongKeys()
-{
-    testcaseInit("find_long_keys");
-    char longKey[1024];
-    memset(longKey, '*', SIZEOF(longKey));
-
-    char *jsonText = testMalloc(SIZEOF(longKey) * 3);
-    char *text = jsonText;
-    *text++ = '{';
-    *text++ = '"';
-    memcpy(text, longKey, SIZEOF(longKey));
-    text += SIZEOF(longKey);
-    *text++ = '"';
-    *text++ = ':';
-    *text++ = '{';
-    *text++ = '"';
-    memcpy(text, longKey, SIZEOF(longKey));
-    text += SIZEOF(longKey);
-    *text++ = '"';
-    *text++ = ':';
-    *text++ = '4';
-    *text++ = '2';
-    *text++ = '}';
-    *text++ = '}';
-    *text++ = '\0';
-
-    JsonDocument *doc = createTestDocument(jsonText);
-    JsonValue *root = jsonRoot(doc);
-
-    testForEachValue(root, testCheckLocations);
-
-    char *jsonPtr = testMalloc(SIZEOF(longKey) * 2 + 3);
-    char *ptr = jsonPtr;
-    *ptr++ = '/';
-    memcpy(ptr, longKey, SIZEOF(longKey));
-    ptr += SIZEOF(longKey);
-    *ptr++ = '/';
-    memcpy(ptr, longKey, SIZEOF(longKey));
-    ptr += SIZEOF(longKey);
-    *ptr++ = '\0';
-
-    JsonValue *val = testFind(root, jsonPtr);
-    CHECK(jsonType(val) == kTypeInteger);
-    CHECK(jsonInteger(val) == 42);
-    jsonDestroyDocument(doc);
-    testFree(jsonPtr);
-    testFree(jsonText);
-}
-
-static void testcaseFindInvalidPointer()
-{
-    testcaseInit("find_invalid_pointer");
-    JsonDocument *doc = createTestDocument(kQueryExample);
-    JsonValue *root = jsonRoot(doc);
-
-    // Missing leading '/'
-    testInvalidPointer(root, "menu");
-
-    // Corrupted array index
-    testInvalidPointer(root, "/menu/items/01");
-    testInvalidPointer(root, "/menu/items/1x");
-
-    jsonDestroyDocument(doc);
-}
-
 static void testcaseCursorContainerRoot()
 {
     testcaseInit("cursor_container_root");
     JsonDocument *doc = createTestDocument("[42,[true]]");
-    JsonValue *root = jsonRoot(doc);
-
-    struct JsonCursor c;
-    jsonCursorInit(root, kCursorNormal, &c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeInteger);
-    CHECK(jsonInteger(c.value) == 42);
-    jsonCursorNext(&c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeArray);
-    CHECK(jsonLength(c.value) == 1);
-    jsonCursorNext(&c);
-    CHECK(!jsonCursorIsValid(&c));
-
-    jsonCursorInit(root, kCursorRecursive, &c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeArray);
-    CHECK(jsonLength(c.value) == 2);
-    jsonCursorNext(&c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeInteger);
-    CHECK(jsonInteger(c.value) == 42);
-    jsonCursorNext(&c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeArray);
-    CHECK(jsonLength(c.value) == 1);
-    jsonCursorNext(&c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeBoolean);
-    CHECK(jsonBoolean(c.value));
-    jsonCursorNext(&c);
-    CHECK(!jsonCursorIsValid(&c));
-
+    testCheckIteration(jsonRoot(doc), "<a:2><i:42><a:1><true>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "<i:42><a:1>", kCursorNormal);
     jsonDestroyDocument(doc);
 }
 
@@ -582,17 +402,32 @@ static void testcaseCursorNonContainerRoot()
 {
     testcaseInit("cursor_non_container_root");
     JsonDocument *doc = createTestDocument("42");
-    JsonValue *root = jsonRoot(doc);
+    testCheckIteration(jsonRoot(doc), "<i:42>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "", kCursorNormal);
+    jsonDestroyDocument(doc);
+}
 
-    struct JsonCursor c;
-    jsonCursorInit(root, kCursorNormal, &c);
-    CHECK(!jsonCursorIsValid(&c));
+static void testcaseCursorNested()
+{
+    testcaseInit("cursor_nested");
+    JsonDocument *doc = createTestDocument("[[[{\"a\":1}],2,3],4,[5,[{\"b\":6},[7]],[8],"
+                                           "{\"c\":[[9,10]]}]]");
+    testCheckIteration(jsonRoot(doc),
+                       "<a:3><a:3><a:1><o:1><k:a><i:1><i:2><i:3><i:4><a:4><i:5><a:2><o:1>"
+                       "<k:b><i:6><a:1><i:7><a:1><i:8><o:1><k:c><a:1><a:2><i:9><i:10>",
+                       kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "<a:3><i:4><a:4>", kCursorNormal);
+    jsonDestroyDocument(doc);
+}
 
-    jsonCursorInit(root, kCursorRecursive, &c);
-    CHECK(jsonCursorIsValid(&c));
-    CHECK(jsonType(c.value) == kTypeInteger);
-    CHECK(jsonInteger(c.value) == 42);
-
+static void testcaseCursorParent()
+{
+    testcaseInit("cursor_parent");
+    JsonDocument *doc = createTestDocument("[1,2,{\"a\":{\"b\":[3,[4]]}},5,6]");
+    testCheckIteration(jsonRoot(doc),
+                       "<a:5><i:1><i:2><o:1><k:a><o:1><k:b><a:2><i:3><a:1><i:4><i:5><i:6>",
+                       kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "<i:1><i:2><o:1><i:5><i:6>", kCursorNormal);
     jsonDestroyDocument(doc);
 }
 
@@ -608,16 +443,11 @@ int main()
 
     testcaseArrayGet();
     testcaseObjectGet();
-    testcaseFindExistent();
-    testcaseFindNonexistent();
-    testcaseFindRelative();
-    testcaseFindInvalidPointer();
-    testcaseFindScalarRoot();
-    testcaseFindWithEscapes();
-    testcaseFindLongKeys();
     testcaseReaderOom();
     testcaseCursorContainerRoot();
     testcaseCursorNonContainerRoot();
+    testcaseCursorNested();
+    testcaseCursorParent();
     testcaseLongStrings();
 
     checkForLeaks();

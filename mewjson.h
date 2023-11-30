@@ -101,30 +101,6 @@ JsonValue *jsonRoot(JsonDocument *doc);
 // bytes are required to write a particular value. The written text is always a valid JSON document.
 JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root);
 
-enum JsonQueryStatus {
-    kQueryOk,
-    kQueryNoMemory,
-    kQueryNotFound,
-    kQueryPathInvalid,
-    kQueryStatusCount
-};
-
-// Find a descendent of the given root value using a JSON pointer
-MEWJSON_NODISCARD
-enum JsonQueryStatus jsonFind(JsonValue *root, const char *jsonPtr, JsonSize ptrSize,
-                              JsonValue **out);
-
-// Add an object member key to a JSON pointer
-JsonSize jsonPointerWriteKey(char *jsonPtr, JsonSize ptrSize, const char *key, JsonSize length);
-
-// Add an array index to a JSON pointer
-JsonSize jsonPointerWriteIndex(char *jsonPtr, JsonSize ptrSize, JsonSize index);
-
-// Write the JSON pointer that refers to the given JSON value, relative to the root
-// Returns the number of bytes needed to hold the JSON pointer, or -1 if the search value is not a
-// descendent of the root value.
-JsonSize jsonLocate(JsonValue *root, char *jsonPtr, JsonSize ptrSize, JsonValue *val);
-
 // Return the length of a JSON value
 // When called on an object or array, this function returns the number of elements or members,
 // respectively. For strings, this function returns the number of bytes. For all other types,
@@ -174,22 +150,23 @@ JsonSize jsonObjectFind(JsonValue *obj, const char *key, JsonSize length);
 JsonValue *jsonContainerGet(JsonValue *container, JsonSize index);
 
 // Determines the behavior of a cursor during traversal
+// kCursorNormal visits the immediate children of a container node, and kCursorRecursive
+// visits all nodes rooted at the target node, including the target node itself.
 // The following examples show how each mode behaves. The numbers indicate the order in
 // which the various JSON values are encountered. Each example assumes that the cursor is
 // started on the root value: an array in the first case and an integer in the second.
-//  Document  | kCursorNormal | kCursorRecursive
-// -----------|---------------|------------------
-//   [        |               | 1
-//     "a",   | 1             | 2
-//     [      | 2             | 3
-//       true |               | 4
-//     ]      |               |
-//   ]        |               |
+//  Document  | kCursorNormal | kCursorRecursive | Node
+// -----------|---------------|------------------|--------------
+//   [        |               | 1                | [...]
+//     "a",   | 1             | 2                | "a"
+//     [      | 2             | 3                | [...]
+//       true |               | 4                | true
+//     ]      |               |                  |
+//   ]        |               |                  |
 //
-//  Document  | kCursorNormal | kCursorRecursive
-// -----------|---------------|------------------
-//   42       |               | 1
-
+//  Document  | kCursorNormal | kCursorRecursive | Node
+// -----------|---------------|------------------|--------------
+//   42       |               | 1                | 42
 enum JsonCursorMode {
     kCursorNormal,
     kCursorRecursive,
@@ -197,6 +174,7 @@ enum JsonCursorMode {
 
 struct JsonCursor {
     JsonValue *root;
+    JsonValue *parent;
     JsonValue *value;
     enum JsonCursorMode mode;
 };
