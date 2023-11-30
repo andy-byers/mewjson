@@ -690,21 +690,21 @@ static void testcaseParseErrors()
         // Skip kParseOk
         // Skip kParseNoMemory
         // Skip kParseExceededMaxDepth
-        {kParseStringInvalidEscape, "\"\\xFF\""},
-        {kParseStringInvalidCodepoint, "\"\\uXYZW\""},
-        {kParseStringMissingLowSurrogate, "\"\\uD800\\uD800\""},
-        {kParseStringMissingHighSurrogate, "\"\\uDC00\""},
-        {kParseStringUnescapedControl, "\"\x01\""},
-        {kParseStringInvalidUtf8, "\"\xED\xA0\x80\""},
-        {kParseLiteralInvalid, "tru"},
-        {kParseNumberMissingExponent, "1.23e"},
-        {kParseNumberMissingFraction, "1.e23"},
-        {kParseNumberInvalid, "0123"},
-        {kParseContainerNotClosed, "[{}"},
-        {kParseContainerNotClosed, "["},
-        {kParseSyntaxError, "[]123"},
-        {kParseSyntaxError, "", true},
-        {kParseSyntaxError, " "},
+        {.reason = kParseStringInvalidEscape, .text = "\"\\xFF\""},
+        {.reason = kParseStringInvalidCodepoint, .text = "\"\\uXYZW\""},
+        {.reason = kParseStringMissingLowSurrogate, .text = "\"\\uD800\\uD800\""},
+        {.reason = kParseStringMissingHighSurrogate, .text = "\"\\uDC00\""},
+        {.reason = kParseStringUnescapedControl, .text = "\"\x01\""},
+        {.reason = kParseStringInvalidUtf8, .text = "\"\xED\xA0\x80\""},
+        {.reason = kParseLiteralInvalid, .text = "tru"},
+        {.reason = kParseNumberMissingExponent, .text = "1.23e"},
+        {.reason = kParseNumberMissingFraction, .text = "1.e23"},
+        {.reason = kParseNumberInvalid, .text = "0123"},
+        {.reason = kParseContainerNotClosed, .text = "[{}"},
+        {.reason = kParseContainerNotClosed, .text = "["},
+        {.reason = kParseSyntaxError, .text = "[]123"},
+        {.reason = kParseSyntaxError, .text = "", .zeroOffset = true},
+        {.reason = kParseSyntaxError, .text = " "},
     };
 
     struct JsonParser parser;
