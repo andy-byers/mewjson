@@ -33,20 +33,19 @@ struct Slice {
         .ptr = (s), .len = strlen(s)                                                               \
     }
 
-static struct JsonAllocator sAllocator = {
-    malloc,
-    realloc,
-    free,
-};
-
-void jsonSetAllocator(struct JsonAllocator a)
+void jsonParserInit(struct JsonParser *parser, struct JsonAllocator *a)
 {
-    sAllocator = a;
+    static const struct JsonAllocator kPrototype = {
+        .malloc = malloc,
+        .realloc = realloc,
+        .free = free,
+    };
+    parser->x.a = a ? *a : kPrototype;
 }
 
-#define JSON_MALLOC(size) sAllocator.malloc((size_t)(size))
-#define JSON_REALLOC(ptr, size) sAllocator.realloc(ptr, (size_t)(size))
-#define JSON_FREE(ptr) sAllocator.free(ptr)
+#define JSON_MALLOC(a, size) (a).malloc((size_t)(size))
+#define JSON_REALLOC(a, ptr, size) (a).realloc(ptr, (size_t)(size))
+#define JSON_FREE(a, ptr) (a).free(ptr)
 
 typedef uint64_t ValueTag;
 // 3 bits are needed to represent the 6 possible JSON value types. The rest of the bits are used
@@ -87,13 +86,15 @@ static JsonBool isObject(const JsonValue *v)
 
 // Represents a JSON parse tree
 struct JsonDocument {
-    // Padded JSON text that was parsed to create this document
-    char *text;
+    struct JsonAllocator a;
 
     // Array of JSON value nodes
     JsonValue *values;
     JsonSize length;
     JsonSize capacity;
+
+    // Padded JSON text that was parsed to create this document
+    char text[];
 };
 
 static JsonValue *docFetchValue(JsonDocument *doc, JsonSize index)
@@ -111,7 +112,7 @@ static JsonValue *docAppendValue(struct JsonParser *parser, enum JsonType type)
             cap *= 2;
         }
         // Resize the buffer to fit cap pointers to JsonValue.
-        JsonValue *ptr = JSON_REALLOC(doc->values, cap * SIZEOF(*doc->values));
+        JsonValue *ptr = JSON_REALLOC(parser->x.a, doc->values, cap * SIZEOF(*doc->values));
         if (!ptr) {
             parser->status = kParseNoMemory;
             return NULL;
@@ -802,8 +803,9 @@ static int parserParse(struct JsonParser *parser, const char **ptr)
     return parserFinish(parser, state, ptr);
 }
 
-static void parserFinalize(struct JsonParser *parser, JsonSize offset, JsonSize length)
+static void parserFinalize(struct JsonParser *parser, const char *ptr, JsonSize length)
 {
+    const JsonSize offset = ptr - parser->x.doc->text;
     parser->offset = MIN(offset, length);
     if (parser->status != kParseOk) {
         goto handle_error;
@@ -827,24 +829,22 @@ handle_error:
 MEWJSON_NODISCARD
 JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *parser)
 {
-    *parser = (struct JsonParser){.offset = -1};
-    char *text = JSON_MALLOC(length + PADDING_LENGTH);
-    JsonDocument *doc = JSON_MALLOC(sizeof(JsonDocument));
-    if (!text || !doc) {
-        JSON_FREE(doc);
-        JSON_FREE(text);
+    struct JsonAllocator a = parser->x.a;
+    *parser = (struct JsonParser){.offset = -1, .x = {.a = a}};
+    JsonDocument *doc = JSON_MALLOC(a, sizeof(JsonDocument) + length + PADDING_LENGTH);
+    if (!doc) {
         parser->status = kParseNoMemory;
         return NULL;
     }
-    memcpy(text, input, length);
-    memset(text + length, EOF, PADDING_LENGTH);
-    *doc = (JsonDocument){.text = text};
+    memcpy(doc->text, input, length);
+    memset(doc->text + length, EOF, PADDING_LENGTH);
+    *doc = (JsonDocument){.a = a};
     parser->x.doc = doc;
 
     // Parse the document.
-    const char *ptr = text;
+    const char *ptr = doc->text;
     parserParse(parser, &ptr);
-    parserFinalize(parser, ptr - text, length);
+    parserFinalize(parser, ptr, length);
     return parser->x.doc;
 }
 
@@ -1189,9 +1189,8 @@ JsonValue *jsonRoot(JsonDocument *doc)
 void jsonDestroyDocument(JsonDocument *doc)
 {
     if (doc) {
-        JSON_FREE(doc->values);
-        JSON_FREE(doc->text);
-        JSON_FREE(doc);
+        JSON_FREE(doc->a, doc->values);
+        JSON_FREE(doc->a, doc);
     }
 }
 

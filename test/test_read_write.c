@@ -524,7 +524,7 @@ static struct Testcase {
 };
 // clang-format on
 
-static void sanityCheckRealEquality()
+static void sanityCheckRealEquality(void)
 {
     CHECK(areRealsEqual(0.0, -0.0));
     CHECK(areRealsEqual(1.0, 1.0));
@@ -536,6 +536,15 @@ static void sanityCheckRealEquality()
     CHECK(!areRealsEqual(1.0, 1.0 + 1e-10));
     CHECK(!areRealsEqual(INFINITY, -INFINITY));
     CHECK(!areRealsEqual(NAN, NAN));
+}
+
+static void testSetAllocator(struct JsonParser *parser)
+{
+    jsonParserInit(parser, &(struct JsonAllocator){
+                               leakCheckMalloc,
+                               leakCheckRealloc,
+                               leakCheckFree,
+                           });
 }
 
 static void testcaseInit(const char *name)
@@ -580,6 +589,7 @@ static void testcaseRun(struct Testcase *tc)
     testcaseInit(tc->name);
 
     struct JsonParser parser;
+    testSetAllocator(&parser);
     JsonDocument *doc = jsonRead(tc->input, tc->inputLen, &parser);
     if (tc->type == kTestcaseNo) {
         // Must fail for a reason other than running out of memory. OOM conditions are tested
@@ -602,12 +612,13 @@ static void testcaseRun(struct Testcase *tc)
     jsonDestroyDocument(doc);
 }
 
-static void testcaseLargeNumbers()
+static void testcaseLargeNumbers(void)
 {
     testcaseInit("large_numbers");
     static const char kText[] = "[-1e1111,1e1111]";
 
     struct JsonParser parser;
+    testSetAllocator(&parser);
     JsonDocument *doc = jsonRead(kText, (JsonSize)strlen(kText), &parser);
     CHECK(parser.status == kParseOk);
     CHECK(doc);
@@ -639,7 +650,7 @@ static void testcaseLargeNumbers()
     jsonDestroyDocument(doc);
 }
 
-static void testcaseExceedMaxDepth()
+static void testcaseExceedMaxDepth(void)
 {
     testcaseInit("exceed_max_depth");
     const JsonSize kDepth = 100000;
@@ -650,6 +661,7 @@ static void testcaseExceedMaxDepth()
     buffer[kDepth] = '\0';
 
     struct JsonParser parser;
+    testSetAllocator(&parser);
     JsonDocument *doc = jsonRead(buffer, (JsonSize)strlen(buffer), &parser);
     CHECK(parser.status == kParseExceededMaxDepth);
     CHECK(!doc);
@@ -660,7 +672,7 @@ static void testcaseExceedMaxDepth()
 // properly, we have to make sure that strtod() doesn't run past the section of
 // buffer made available to jsonRead(). If the number is adjacent to the end of the
 // buffer, we have to copy it to a separate buffer and write a '\0'.
-static void testcaseDigitsPastEndOfInput()
+static void testcaseDigitsPastEndOfInput(void)
 {
     testcaseInit("digits_past_end_of_input");
     const double kResult[] = {
@@ -669,6 +681,7 @@ static void testcaseDigitsPastEndOfInput()
     const char kText[] = "0.23456789";
 
     struct JsonParser parser;
+    testSetAllocator(&parser);
     for (JsonSize i = 3; i < 10; ++i) {
         JsonDocument *doc = jsonRead(kText, i, &parser);
         CHECK(parser.status == kParseOk);
@@ -678,7 +691,7 @@ static void testcaseDigitsPastEndOfInput()
     }
 }
 
-static void testcaseParseErrors()
+static void testcaseParseErrors(void)
 {
     testcaseInit("parse_errors");
 
@@ -708,6 +721,7 @@ static void testcaseParseErrors()
     };
 
     struct JsonParser parser;
+    testSetAllocator(&parser);
     for (JsonSize i = 0; i < COUNTOF(kInputs); ++i) {
         CHECK(!jsonRead(kInputs[i].text, (JsonSize)strlen(kInputs[i].text), &parser));
         CHECK(parser.status == kInputs[i].reason);
@@ -755,7 +769,7 @@ static void runOnePassFailTest(const char *name, enum TestcaseType type)
     leakCheckFree(text);
 }
 
-static void runExternalPassFailTests()
+static void runExternalPassFailTests(void)
 {
     for (JsonSize i = 0; i < COUNTOF(kYesTestNames); ++i) {
         runOnePassFailTest(kYesTestNames[i], kTestcaseYes);
@@ -765,21 +779,15 @@ static void runExternalPassFailTests()
     }
 }
 
-static void runInternalPassFailTests()
+static void runInternalPassFailTests(void)
 {
     for (size_t i = 0; i < COUNTOF(sInternalTestcases); ++i) {
         testcaseRun(&sInternalTestcases[i]);
     }
 }
 
-int main()
+int main(void)
 {
-    jsonSetAllocator((struct JsonAllocator){
-        leakCheckMalloc,
-        leakCheckRealloc,
-        leakCheckFree,
-    });
-
     puts("* * * running RFC 8259 conformance tests * * *");
 
     sanityCheckRealEquality();

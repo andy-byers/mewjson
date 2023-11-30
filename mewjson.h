@@ -36,8 +36,22 @@
 typedef _Bool JsonBool;
 typedef ptrdiff_t JsonSize;
 
+// JSON value (object, array, string, integer, real number, boolean, or null)
+typedef struct JsonValue JsonValue;
+
 // Parsed JSON document
 typedef struct JsonDocument JsonDocument;
+
+// Describes the type of JSON value
+enum JsonType {
+    kTypeString,
+    kTypeInteger,
+    kTypeReal,
+    kTypeBoolean,
+    kTypeNull,
+    kTypeObject,
+    kTypeArray,
+};
 
 // Status code produced by the parser
 enum JsonParseStatus {
@@ -59,6 +73,14 @@ enum JsonParseStatus {
     kParseStatusCount
 };
 
+// General-purpose allocation routines used by the parser
+// User-provided allocators must return memory that is aligned to at least _Alignof(max_align_t).
+struct JsonAllocator {
+    void *(*malloc)(size_t);
+    void *(*realloc)(void *, size_t);
+    void (*free)(void *);
+};
+
 // JSON parser context
 struct JsonParser {
     // Byte offset that the parser stopped on in the input buffer.
@@ -69,12 +91,18 @@ struct JsonParser {
     enum JsonParseStatus status;
 
     // Private members.
-    struct JsonParserPrivate {
+    struct {
+        struct JsonAllocator a;
         JsonDocument *doc;
         JsonSize upIndex;
         JsonSize depth;
     } x;
 };
+
+// Initialize a parser
+// This function must be called prior to jsonRead(). If the allocator parameter is NULL, then the
+// standard C general purpose allocation routines (malloc, realloc, and free) are used.
+void jsonParserInit(struct JsonParser *parser, struct JsonAllocator *a);
 
 // Free memory associated with a document
 void jsonDestroyDocument(JsonDocument *doc);
@@ -86,9 +114,6 @@ void jsonDestroyDocument(JsonDocument *doc);
 // the returned document when it is no longer needed.
 MEWJSON_NODISCARD
 JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *parser);
-
-// JSON value (object, array, string, integer, real number, boolean, or null)
-typedef struct JsonValue JsonValue;
 
 // Return the root value of a document
 // A successfully-parsed document will always have a single root value. The root can be of
@@ -106,17 +131,6 @@ JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root);
 // respectively. For strings, this function returns the number of bytes. For all other types,
 // this function returns 0.
 JsonSize jsonLength(const JsonValue *val);
-
-// Describes the type of JSON value
-enum JsonType {
-    kTypeString,
-    kTypeInteger,
-    kTypeReal,
-    kTypeBoolean,
-    kTypeNull,
-    kTypeObject,
-    kTypeArray,
-};
 
 // Return an enumerator describing the type of JSON value
 enum JsonType jsonType(const JsonValue *val);
@@ -179,10 +193,12 @@ struct JsonCursor {
     enum JsonCursorMode mode;
 };
 
-// Initialize a cursor for traversal over a JSON value
+// Initialize a cursor for traversal over some portion of a JSON document
 void jsonCursorInit(JsonValue *root, enum JsonCursorMode mode, struct JsonCursor *c);
 
 // Return true if a cursor is valid, false otherwise
+// This function must return true before either jsonCursorNext() or jsonCursorKey() are called,
+// or any of the members of struct JsonCursor are accessed.
 JsonBool jsonCursorIsValid(const struct JsonCursor *c);
 
 // Move a cursor to the next JSON value
@@ -193,16 +209,5 @@ void jsonCursorNext(struct JsonCursor *c);
 // If the length parameter is not NULL, this function will write to it the length of the key in
 // bytes.
 const char *jsonCursorKey(struct JsonCursor *c, JsonSize *length);
-
-// General-purpose allocation routines used by the library
-struct JsonAllocator {
-    void *(*malloc)(size_t);
-    void *(*realloc)(void *, size_t);
-    void (*free)(void *);
-};
-
-// Set the general-purpose allocator used to get memory for the library
-// This function is not threadsafe.
-void jsonSetAllocator(struct JsonAllocator a);
 
 #endif // MEWJSON_H
