@@ -29,6 +29,15 @@ static void testFree(void *ptr)
     leakCheckFree(ptr);
 }
 
+static void testSetAllocator(struct JsonParser *parser)
+{
+    jsonParserInit(parser, &(struct JsonAllocator){
+                               testMalloc,
+                               testRealloc,
+                               testFree,
+                           });
+}
+
 // Scratch memory for unescaping JSON pointers
 struct StringBuilder {
     char *ptr;
@@ -44,7 +53,7 @@ static void sbEnsureSpace(struct StringBuilder *sb, JsonSize addedLen)
         while (cap < len) {
             cap *= 2;
         }
-        char *ptr = realloc(sb->ptr, cap);
+        char *ptr = realloc(sb->ptr, (size_t)cap);
         CHECK(ptr);
         sb->ptr = ptr;
         sb->cap = cap;
@@ -84,7 +93,7 @@ static void testcaseInit(const char *name)
     sOomCounter = -1;
 }
 
-static void testcaseLongStrings()
+static void testcaseLongStrings(void)
 {
     testcaseInit("long_strings");
 
@@ -103,6 +112,7 @@ static void testcaseLongStrings()
     strcpy(ptr, "]");
 
     struct JsonParser parser;
+    testSetAllocator(&parser);
     JsonDocument *doc = jsonRead(buffer, (JsonSize)strlen(buffer), &parser);
     CHECK(parser.status == kParseOk);
     CHECK(doc);
@@ -209,10 +219,11 @@ static const char kOomExample[] =
     "    \"taglib-uri\": \"cofax.tld\",\n"
     "    \"taglib-location\": \"/WEB-INF/tlds/cofax.tld\"}}}";
 
-static void testcaseReaderOom()
+static void testcaseReaderOom(void)
 {
     testcaseInit("reader_oom");
     struct JsonParser parser;
+    testSetAllocator(&parser);
 
     int failures = 0;
     for (;; ++failures) {
@@ -325,13 +336,14 @@ static void testCheckIteration(JsonValue *root, const char *result, enum JsonCur
 static JsonDocument *createTestDocument(const char *text)
 {
     struct JsonParser parser;
+    testSetAllocator(&parser);
     JsonDocument *doc = jsonRead(text, (JsonSize)strlen(text), &parser);
     CHECK(parser.status == kParseOk);
     CHECK(doc);
     return doc;
 }
 
-static void testcaseObjectGet()
+static void testcaseObjectGet(void)
 {
     testcaseInit("object_get");
     JsonDocument *doc = createTestDocument(kQueryExample);
@@ -342,7 +354,7 @@ static void testcaseObjectGet()
     val = jsonContainerGet(obj, 0);
     CHECK(val);
     CHECK(jsonType(val) == kTypeString);
-    CHECK(0 == memcmp(jsonString(val), "SVG Viewer", jsonLength(val)));
+    CHECK(0 == memcmp(jsonString(val), "SVG Viewer", (size_t)jsonLength(val)));
 
     val = jsonContainerGet(obj, 1);
     CHECK(val);
@@ -357,7 +369,7 @@ static void testcaseObjectGet()
     jsonDestroyDocument(doc);
 }
 
-static void testcaseArrayGet()
+static void testcaseArrayGet(void)
 {
     testcaseInit("array_get");
     JsonDocument *doc = createTestDocument(kQueryExample);
@@ -381,7 +393,7 @@ static void testcaseArrayGet()
             val = jsonContainerGet(val, 0);
             CHECK(jsonType(val) == kTypeString);
             CHECK(jsonLength(val) == (JsonSize)strlen(kElements[i]));
-            CHECK(0 == memcmp(jsonString(val), kElements[i], jsonLength(val)));
+            CHECK(0 == memcmp(jsonString(val), kElements[i], (size_t)jsonLength(val)));
         } else {
             CHECK(jsonType(val) == kTypeNull);
         }
@@ -389,7 +401,7 @@ static void testcaseArrayGet()
     jsonDestroyDocument(doc);
 }
 
-static void testcaseCursorContainerRoot()
+static void testcaseCursorContainerRoot(void)
 {
     testcaseInit("cursor_container_root");
     JsonDocument *doc = createTestDocument("[42,[true]]");
@@ -398,16 +410,35 @@ static void testcaseCursorContainerRoot()
     jsonDestroyDocument(doc);
 }
 
-static void testcaseCursorNonContainerRoot()
+static void testcaseCursorScalarRoot(void)
 {
-    testcaseInit("cursor_non_container_root");
+    testcaseInit("cursor_scalar_root");
     JsonDocument *doc = createTestDocument("42");
     testCheckIteration(jsonRoot(doc), "<i:42>", kCursorRecursive);
     testCheckIteration(jsonRoot(doc), "", kCursorNormal);
     jsonDestroyDocument(doc);
+
+    doc = createTestDocument("\"abc\"");
+    testCheckIteration(jsonRoot(doc), "<s:abc>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "", kCursorNormal);
+    jsonDestroyDocument(doc);
 }
 
-static void testcaseCursorNested()
+static void testcaseCursorEmptyRoot(void)
+{
+    testcaseInit("cursor_empty_root");
+    JsonDocument *doc = createTestDocument("{}");
+    testCheckIteration(jsonRoot(doc), "<o:0>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "", kCursorNormal);
+    jsonDestroyDocument(doc);
+
+    doc = createTestDocument("[]");
+    testCheckIteration(jsonRoot(doc), "<a:0>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "", kCursorNormal);
+    jsonDestroyDocument(doc);
+}
+
+static void testcaseCursorNested(void)
 {
     testcaseInit("cursor_nested");
     JsonDocument *doc = createTestDocument("[[[{\"a\":1}],2,3],4,[5,[{\"b\":6},[7]],[8],"
@@ -420,34 +451,73 @@ static void testcaseCursorNested()
     jsonDestroyDocument(doc);
 }
 
-static void testcaseCursorParent()
+static void testcaseCursorParent(void)
 {
     testcaseInit("cursor_parent");
     JsonDocument *doc = createTestDocument("[1,2,{\"a\":{\"b\":[3,[4]]}},5,6]");
     testCheckIteration(jsonRoot(doc),
-                       "<a:5><i:1><i:2><o:1><k:a><o:1><k:b><a:2><i:3><a:1><i:4><i:5><i:6>",
+                       "<a:5><i:1><i:2><o:1><k:a><o:1><k:b>"
+                       "<a:2><i:3><a:1><i:4><i:5><i:6>",
                        kCursorRecursive);
     testCheckIteration(jsonRoot(doc), "<i:1><i:2><o:1><i:5><i:6>", kCursorNormal);
     jsonDestroyDocument(doc);
+
+    doc = createTestDocument("[1,[2,[[[[3],4],5],6]]]");
+    testCheckIteration(jsonRoot(doc),
+                       "<a:2><i:1><a:2><i:2><a:2><a:2><a:2>"
+                       "<a:1><i:3><i:4><i:5><i:6>",
+                       kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "<i:1><a:2>", kCursorNormal);
+    jsonDestroyDocument(doc);
 }
 
-int main()
+static void testcaseReadmeExample(void)
 {
-    jsonSetAllocator((struct JsonAllocator){
-        testMalloc,
-        testRealloc,
-        testFree,
-    });
+    testcaseInit("readme_example");
 
+    static const char kJson[] = "[1,[2,[3],4],5]";
+
+    struct JsonParser parser;
+    jsonParserInit(&parser, NULL);
+
+    JsonDocument *doc = jsonRead(kJson, (JsonSize)strlen(kJson), &parser);
+    CHECK(doc);
+    JsonValue *root = jsonRoot(doc);
+    CHECK(jsonType(root) == kTypeArray);
+    CHECK(jsonLength(root) == 3);
+
+    int64_t integer = 1;
+    struct JsonCursor c;
+    jsonCursorInit(root, kCursorRecursive, &c);
+    while (jsonCursorIsValid(&c)) {
+        if (jsonType(c.value) == kTypeInteger) {
+            CHECK(jsonInteger(c.value) == integer);
+            ++integer;
+        }
+        jsonCursorNext(&c);
+    }
+
+    JsonValue *arr = jsonContainerGet(root, 1);
+    const JsonSize n = jsonWrite(NULL, 0, arr);
+    char *buffer = malloc((size_t)n);
+    CHECK(n == jsonWrite(buffer, n, arr));
+
+    jsonDestroyDocument(doc);
+}
+
+int main(void)
+{
     puts("* * * running document API tests * * *");
 
     testcaseArrayGet();
     testcaseObjectGet();
     testcaseReaderOom();
     testcaseCursorContainerRoot();
-    testcaseCursorNonContainerRoot();
+    testcaseCursorScalarRoot();
+    testcaseCursorEmptyRoot();
     testcaseCursorNested();
     testcaseCursorParent();
+    testcaseReadmeExample();
     testcaseLongStrings();
 
     checkForLeaks();

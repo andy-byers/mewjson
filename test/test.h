@@ -20,7 +20,7 @@
 #define STR(x) XSTR(x)
 #define CAT(x, y) XSTR(x##y)
 
-void checkForLeaks();
+void checkForLeaks(void);
 void *leakCheckMalloc(size_t size);
 void *leakCheckRealloc(void *ptr, size_t size);
 void leakCheckFree(void *ptr);

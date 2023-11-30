@@ -43,6 +43,7 @@ static char *writeJsonText(JsonDocument *doc, JsonSize *textLen)
 extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     struct JsonParser parser;
+    jsonParserInit(&parser, NULL);
     // Read straight from the input buffer.
     JsonDocument *doc = jsonRead((const char *)data, (JsonSize)size, &parser);
     if (doc) {

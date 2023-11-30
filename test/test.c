@@ -41,7 +41,7 @@ void leakCheckFree(void *ptr)
     }
 }
 
-void checkForLeaks()
+void checkForLeaks(void)
 {
     CHECK(sBytesUsed == 0);
 }
