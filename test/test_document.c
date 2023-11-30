@@ -53,7 +53,7 @@ static void sbEnsureSpace(struct StringBuilder *sb, JsonSize addedLen)
         while (cap < len) {
             cap *= 2;
         }
-        char *ptr = realloc(sb->ptr, cap);
+        char *ptr = realloc(sb->ptr, (size_t)cap);
         CHECK(ptr);
         sb->ptr = ptr;
         sb->cap = cap;
@@ -354,7 +354,7 @@ static void testcaseObjectGet(void)
     val = jsonContainerGet(obj, 0);
     CHECK(val);
     CHECK(jsonType(val) == kTypeString);
-    CHECK(0 == memcmp(jsonString(val), "SVG Viewer", jsonLength(val)));
+    CHECK(0 == memcmp(jsonString(val), "SVG Viewer", (size_t)jsonLength(val)));
 
     val = jsonContainerGet(obj, 1);
     CHECK(val);
@@ -393,7 +393,7 @@ static void testcaseArrayGet(void)
             val = jsonContainerGet(val, 0);
             CHECK(jsonType(val) == kTypeString);
             CHECK(jsonLength(val) == (JsonSize)strlen(kElements[i]));
-            CHECK(0 == memcmp(jsonString(val), kElements[i], jsonLength(val)));
+            CHECK(0 == memcmp(jsonString(val), kElements[i], (size_t)jsonLength(val)));
         } else {
             CHECK(jsonType(val) == kTypeNull);
         }
@@ -410,11 +410,30 @@ static void testcaseCursorContainerRoot(void)
     jsonDestroyDocument(doc);
 }
 
-static void testcaseCursorNonContainerRoot(void)
+static void testcaseCursorScalarRoot(void)
 {
-    testcaseInit("cursor_non_container_root");
+    testcaseInit("cursor_scalar_root");
     JsonDocument *doc = createTestDocument("42");
     testCheckIteration(jsonRoot(doc), "<i:42>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "", kCursorNormal);
+    jsonDestroyDocument(doc);
+
+    doc = createTestDocument("\"abc\"");
+    testCheckIteration(jsonRoot(doc), "<s:abc>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "", kCursorNormal);
+    jsonDestroyDocument(doc);
+}
+
+static void testcaseCursorEmptyRoot(void)
+{
+    testcaseInit("cursor_empty_root");
+    JsonDocument *doc = createTestDocument("{}");
+    testCheckIteration(jsonRoot(doc), "<o:0>", kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "", kCursorNormal);
+    jsonDestroyDocument(doc);
+
+    doc = createTestDocument("[]");
+    testCheckIteration(jsonRoot(doc), "<a:0>", kCursorRecursive);
     testCheckIteration(jsonRoot(doc), "", kCursorNormal);
     jsonDestroyDocument(doc);
 }
@@ -437,9 +456,52 @@ static void testcaseCursorParent(void)
     testcaseInit("cursor_parent");
     JsonDocument *doc = createTestDocument("[1,2,{\"a\":{\"b\":[3,[4]]}},5,6]");
     testCheckIteration(jsonRoot(doc),
-                       "<a:5><i:1><i:2><o:1><k:a><o:1><k:b><a:2><i:3><a:1><i:4><i:5><i:6>",
+                       "<a:5><i:1><i:2><o:1><k:a><o:1><k:b>"
+                       "<a:2><i:3><a:1><i:4><i:5><i:6>",
                        kCursorRecursive);
     testCheckIteration(jsonRoot(doc), "<i:1><i:2><o:1><i:5><i:6>", kCursorNormal);
+    jsonDestroyDocument(doc);
+
+    doc = createTestDocument("[1,[2,[[[[3],4],5],6]]]");
+    testCheckIteration(jsonRoot(doc),
+                       "<a:2><i:1><a:2><i:2><a:2><a:2><a:2>"
+                       "<a:1><i:3><i:4><i:5><i:6>",
+                       kCursorRecursive);
+    testCheckIteration(jsonRoot(doc), "<i:1><a:2>", kCursorNormal);
+    jsonDestroyDocument(doc);
+}
+
+static void testcaseReadmeExample(void)
+{
+    testcaseInit("readme_example");
+
+    static const char kJson[] = "[1,[2,[3],4],5]";
+
+    struct JsonParser parser;
+    jsonParserInit(&parser, NULL);
+
+    JsonDocument *doc = jsonRead(kJson, (JsonSize)strlen(kJson), &parser);
+    CHECK(doc);
+    JsonValue *root = jsonRoot(doc);
+    CHECK(jsonType(root) == kTypeArray);
+    CHECK(jsonLength(root) == 3);
+
+    int64_t integer = 1;
+    struct JsonCursor c;
+    jsonCursorInit(root, kCursorRecursive, &c);
+    while (jsonCursorIsValid(&c)) {
+        if (jsonType(c.value) == kTypeInteger) {
+            CHECK(jsonInteger(c.value) == integer);
+            ++integer;
+        }
+        jsonCursorNext(&c);
+    }
+
+    JsonValue *arr = jsonContainerGet(root, 1);
+    const JsonSize n = jsonWrite(NULL, 0, arr);
+    char *buffer = malloc((size_t)n);
+    CHECK(n == jsonWrite(buffer, n, arr));
+
     jsonDestroyDocument(doc);
 }
 
@@ -451,9 +513,11 @@ int main(void)
     testcaseObjectGet();
     testcaseReaderOom();
     testcaseCursorContainerRoot();
-    testcaseCursorNonContainerRoot();
+    testcaseCursorScalarRoot();
+    testcaseCursorEmptyRoot();
     testcaseCursorNested();
     testcaseCursorParent();
+    testcaseReadmeExample();
     testcaseLongStrings();
 
     checkForLeaks();

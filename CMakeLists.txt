@@ -18,7 +18,8 @@ option(MEWJSON_BuildTests "Build the tests" ${MAIN_PROJECT})
 
 add_library(mewjson_warnings INTERFACE)
 target_compile_options(mewjson_warnings
-        INTERFACE -Wall -Werror -Wextra -Wpedantic)
+        INTERFACE -Werror -Wall -Wextra -Wpedantic
+                  -Wsign-conversion -Wformat=2)
 
 add_library(mewjson STATIC)
 target_sources(mewjson

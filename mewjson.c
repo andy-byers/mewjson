@@ -831,7 +831,7 @@ JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *pa
 {
     struct JsonAllocator a = parser->x.a;
     *parser = (struct JsonParser){.offset = -1, .x = {.a = a}};
-    JsonDocument *doc = JSON_MALLOC(a, sizeof(JsonDocument) + length + PADDING_LENGTH);
+    JsonDocument *doc = JSON_MALLOC(a, sizeof(JsonDocument) + (size_t)length + PADDING_LENGTH);
     if (!doc) {
         parser->status = kParseNoMemory;
         return NULL;
@@ -912,7 +912,7 @@ static void appendInteger(struct Writer *w, int64_t integer)
     char *end = buffer + COUNTOF(buffer);
     char *ptr = end - 1;
     // Don't call llabs(INT64_MIN). The result is undefined on 2s complement systems.
-    uint64_t u = integer == INT64_MIN ? (1ULL << 63) : llabs(integer);
+    uint64_t u = integer == INT64_MIN ? (1ULL << 63) : (uint64_t)llabs(integer);
     do {
         *ptr-- = (char)(u % 10 + '0');
         u /= 10;
@@ -1015,6 +1015,20 @@ static JsonSize numberOfChildren(const JsonValue *val)
     return 0;
 }
 
+static void cursorAdjustParent(struct JsonCursor *c)
+{
+    c->parent += c->parent->v.up;
+}
+
+static JsonBool cursorEnterNonEmptyContainer(struct JsonCursor *c)
+{
+    if (ISCONTAINER(jsonType(c->value)) && numberOfChildren(c->value) > 0) {
+        c->parent = c->value;
+        return 1;
+    }
+    return 0;
+}
+
 void jsonCursorInit(JsonValue *root, enum JsonCursorMode mode, struct JsonCursor *c)
 {
     *c = (struct JsonCursor){
@@ -1042,16 +1056,17 @@ void jsonCursorNext(struct JsonCursor *c)
     assert(jsonCursorIsValid(c));
     if (c->mode == kCursorNormal) {
         c->value += numberOfChildren(c->value);
-    } else if (ISCONTAINER(jsonType(c->value)) && numberOfChildren(c->value) > 0) {
-        c->parent = c->value;
+    } else if (cursorEnterNonEmptyContainer(c)) {
+        // Entered a nested container.
     } else {
-        while (c->parent != c->root && c->value - c->parent >= numberOfChildren(c->parent)) {
-            assert(ISCONTAINER(jsonType(c->parent)));
-            c->parent += c->parent->v.up;
+        while (c->parent != c->root && c->value - c->parent >= VTAG_SIZE(c->parent->tag)) {
+            // Finished a container. Correct the parent pointer.
+            cursorAdjustParent(c);
         }
     }
-    ++c->value;
+    cursorNext(c);
     if (jsonCursorIsValid(c)) {
+        // Skip the key so that c->value is positioned on the object member value.
         c->value += cursorInObject(c);
     }
 }
@@ -1096,9 +1111,8 @@ JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
         }
         if (ISCONTAINER(jsonType(c.value))) {
             // Value is a nested container.
-            if (VTAG_SIZE(c.value->tag) > 0) {
+            if (cursorEnterNonEmptyContainer(&c)) {
                 appendChar(&w, kContainerBegin[isObject(c.value)]);
-                c.parent = c.value;
                 cursorNext(&c);
                 continue;
             }
@@ -1117,11 +1131,11 @@ next_iteration:
             // adjusts the parent pointer until a container is found with children that still need
             // to be written.
             appendChar(&w, kContainerEnd[isObject(c.parent)]);
-            // Reached the end of the JSON value acting as root.
-            if (c.parent == root) {
+            if (c.parent == c.root) {
+                // Reached the end of the JSON value acting as root.
                 break;
             }
-            c.parent += c.parent->v.up;
+            cursorAdjustParent(&c);
             goto next_iteration;
         }
     }
@@ -1165,7 +1179,7 @@ JsonSize jsonLength(const JsonValue *val)
         return 0;
     }
     // Account for the fact that separate nodes are created for object member name and value.
-    const JsonSize div = 1 + isObject(val);
+    const JsonSize isObj = isObject(val);
     JsonSize num = numberOfChildren(val);
     JsonSize len = 0;
     ++val; // Move to first child
@@ -1177,7 +1191,7 @@ JsonSize jsonLength(const JsonValue *val)
         ++len;
     }
     assert(num == 0);
-    return len / div;
+    return isObj ? len / 2 : len;
 }
 
 JsonValue *jsonRoot(JsonDocument *doc)
@@ -1202,7 +1216,7 @@ JsonSize jsonObjectFind(JsonValue *obj, const char *key, JsonSize length)
     for (JsonSize i = 0; jsonCursorIsValid(&c); ++i) {
         JsonSize n;
         const char *cursorKey = jsonCursorKey(&c, &n);
-        if (length == n && 0 == memcmp(cursorKey, key, length)) {
+        if (length == n && 0 == memcmp(cursorKey, key, (size_t)length)) {
             return i;
         }
         jsonCursorNext(&c);
