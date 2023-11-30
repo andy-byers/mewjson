@@ -82,7 +82,7 @@ void jsonDestroyDocument(JsonDocument *doc);
 // Build an in-memory representation of a JSON document
 // Returns a pointer to JsonDocument representing the parsed document on success, and NULL on
 // failure. The reason for failure can be queried by calling jsonGetError() on the parser. The
-// input buffer does not need to be null-terminated. jsonDestroyDocument() must be called on 
+// input buffer does not need to be null-terminated. jsonDestroyDocument() must be called on
 // the returned document when it is no longer needed.
 MEWJSON_NODISCARD
 JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *parser);
@@ -100,30 +100,6 @@ JsonValue *jsonRoot(JsonDocument *doc);
 // much as possible if there is not enough space. Call jsonWrite(NULL, 0, root) to check how many
 // bytes are required to write a particular value. The written text is always a valid JSON document.
 JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root);
-
-enum JsonQueryStatus {
-    kQueryOk,
-    kQueryNoMemory,
-    kQueryNotFound,
-    kQueryPathInvalid,
-    kQueryStatusCount
-};
-
-// Find a descendent of the given root value using a JSON pointer
-MEWJSON_NODISCARD
-enum JsonQueryStatus jsonFind(JsonValue *root, const char *jsonPtr, JsonSize ptrSize,
-                              JsonValue **out);
-
-// Add an object member key to a JSON pointer
-JsonSize jsonPointerWriteKey(char *jsonPtr, JsonSize ptrSize, const char *key, JsonSize length);
-
-// Add an array index to a JSON pointer
-JsonSize jsonPointerWriteIndex(char *jsonPtr, JsonSize ptrSize, JsonSize index);
-
-// Write the JSON pointer that refers to the given JSON value, relative to the root
-// Returns the number of bytes needed to hold the JSON pointer, or -1 if the search value is not a
-// descendent of the root value.
-JsonSize jsonLocate(JsonValue *root, char *jsonPtr, JsonSize ptrSize, JsonValue *val);
 
 // Return the length of a JSON value
 // When called on an object or array, this function returns the number of elements or members,
@@ -197,6 +173,7 @@ enum JsonCursorMode {
 
 struct JsonCursor {
     JsonValue *root;
+    JsonValue *parent;
     JsonValue *value;
     enum JsonCursorMode mode;
 };

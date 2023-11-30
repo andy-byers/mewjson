@@ -33,13 +33,6 @@ struct Slice {
         .ptr = (s), .len = strlen(s)                                                               \
     }
 
-static void sliceAdvance(struct Slice *s)
-{
-    assert(s->len > 0);
-    ++s->ptr;
-    --s->len;
-}
-
 static struct JsonAllocator sAllocator = {
     malloc,
     realloc,
@@ -69,15 +62,15 @@ static void vTagSetSize(ValueTag *tag, JsonSize n)
     *tag = MAKE_VTAG(VTAG_TYPE(*tag), n);
 }
 
+// Node in a JSON parse tree
 struct JsonValue {
     // Type and size information for the node
     ValueTag tag;
 
-    // Offset of the parent node, relative to this node (0 for the root)
-    JsonSize up;
-
-    // Data contained in the node
+    // Data contained in the node, or the offset of the parent relative to the current
+    // node ("up" variant used for containers)
     union {
+        JsonSize up;
         const char *string;
         int64_t integer;
         double real;
@@ -92,17 +85,18 @@ static JsonBool isObject(const JsonValue *v)
     return jsonType(v) == kTypeObject;
 }
 
+// Represents a JSON parse tree
 struct JsonDocument {
     // Padded JSON text that was parsed to create this document
     char *text;
 
-    // Array of JSON values representing the document
+    // Array of JSON value nodes
     JsonValue *values;
     JsonSize length;
     JsonSize capacity;
 };
 
-static JsonValue *fetchValue(JsonDocument *doc, JsonSize index)
+static JsonValue *docFetchValue(JsonDocument *doc, JsonSize index)
 {
     assert(index >= 0 && index < doc->length);
     return &doc->values[index];
@@ -137,7 +131,7 @@ static JsonValue *docAppendValue(struct JsonParser *parser, enum JsonType type)
     JsonValue *val = &doc->values[doc->length];
     *val = (JsonValue){
         .tag = MAKE_VTAG(type, tag),
-        .up = up - doc->length,
+        .v = {.up = up - doc->length},
     };
     ++doc->length;
     return val;
@@ -255,12 +249,11 @@ static void ungetChar(const char **ptr)
 
 static char skipWhitespace(const char **ptr)
 {
-    for (;;) {
-        const char c = getChar(ptr);
-        if (!ISSPACE(c)) {
-            return c;
-        }
-    }
+    char c;
+    do {
+        c = getChar(ptr);
+    } while (ISSPACE(c));
+    return c;
 }
 
 MEWJSON_NODISCARD
@@ -721,14 +714,15 @@ static enum State parserEndContainer(struct JsonParser *parser)
     JsonDocument *doc = parser->x.doc;
     assert(parser->x.upIndex < doc->length);
     // up is the address of the parent JSON value.
-    JsonValue *up = fetchValue(doc, parser->x.upIndex);
+    JsonValue *up = docFetchValue(doc, parser->x.upIndex);
     const JsonSize index = doc->length - 1;
     vTagSetSize(&up->tag, index - parser->x.upIndex);
-    parser->x.upIndex += up->up;
+    assert(ISCONTAINER(jsonType(up)));
+    parser->x.upIndex += up->v.up;
 
     --parser->x.depth;
     if (parser->x.depth > 0) {
-        up = fetchValue(doc, parser->x.upIndex);
+        up = docFetchValue(doc, parser->x.upIndex);
         // Pretend like the parser just finished reading an object member value or an array
         // element. Essentially, we are considering the whole object or array that we just
         // left to be a single value, rather than a compound structure. We have to check
@@ -1004,7 +998,7 @@ static void writeEmptyContainer(struct Writer *w, struct JsonCursor *c)
 
 static JsonBool cursorInObject(struct JsonCursor *c)
 {
-    return c->value->up && isObject(&c->value[c->value->up]);
+    return c->value != c->parent && isObject(c->parent);
 }
 
 static void cursorNext(struct JsonCursor *c)
@@ -1023,9 +1017,12 @@ static JsonSize numberOfChildren(const JsonValue *val)
 
 void jsonCursorInit(JsonValue *root, enum JsonCursorMode mode, struct JsonCursor *c)
 {
-    c->root = root;
-    c->value = root;
-    c->mode = mode;
+    *c = (struct JsonCursor){
+        .root = root,
+        .parent = root,
+        .value = root,
+        .mode = mode,
+    };
     if (mode == kCursorNormal) {
         // Enter the container and maybe skip the key.
         ++c->value;
@@ -1045,6 +1042,13 @@ void jsonCursorNext(struct JsonCursor *c)
     assert(jsonCursorIsValid(c));
     if (c->mode == kCursorNormal) {
         c->value += numberOfChildren(c->value);
+    } else if (ISCONTAINER(jsonType(c->value)) && numberOfChildren(c->value) > 0) {
+        c->parent = c->value;
+    } else {
+        while (c->parent != c->root && c->value - c->parent >= numberOfChildren(c->parent)) {
+            assert(ISCONTAINER(jsonType(c->parent)));
+            c->parent += c->parent->v.up;
+        }
     }
     ++c->value;
     if (jsonCursorIsValid(c)) {
@@ -1054,6 +1058,9 @@ void jsonCursorNext(struct JsonCursor *c)
 
 const char *jsonCursorKey(struct JsonCursor *c, JsonSize *length)
 {
+    if (c->value == c->parent || !isObject(c->parent)) {
+        return NULL;
+    }
     JsonValue *key = c->value - 1;
     if (length) {
         *length = jsonLength(key);
@@ -1079,7 +1086,7 @@ JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
         writeEmptyContainer(&w, &c);
         return w.acc;
     }
-    for (JsonValue *lastParent = root;;) {
+    for (;;) {
         if (cursorInObject(&c)) {
             // Write an object key. Advance to the value.
             assert(jsonType(c.value) == kTypeString);
@@ -1091,7 +1098,7 @@ JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
             // Value is a nested container.
             if (VTAG_SIZE(c.value->tag) > 0) {
                 appendChar(&w, kContainerBegin[isObject(c.value)]);
-                lastParent = c.value;
+                c.parent = c.value;
                 cursorNext(&c);
                 continue;
             }
@@ -1103,18 +1110,18 @@ JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
         cursorNext(&c);
 
 next_iteration:
-        if (c.value - lastParent <= VTAG_SIZE(lastParent->tag)) {
+        if (c.value - c.parent <= VTAG_SIZE(c.parent->tag)) {
             appendChar(&w, ',');
         } else {
             // Back out of nested containers. This block doesn't move the cursor at all, it just
             // adjusts the parent pointer until a container is found with children that still need
             // to be written.
-            appendChar(&w, kContainerEnd[isObject(lastParent)]);
+            appendChar(&w, kContainerEnd[isObject(c.parent)]);
             // Reached the end of the JSON value acting as root.
-            if (lastParent == root) {
+            if (c.parent == root) {
                 break;
             }
-            lastParent += lastParent->up;
+            c.parent += c.parent->v.up;
             goto next_iteration;
         }
     }
@@ -1219,298 +1226,4 @@ JsonValue *jsonContainerGet(JsonValue *container, JsonSize index)
         }
     }
     return c.value;
-}
-
-// Return code for decodeArrayIndex()
-enum {
-    kArrayIndexNotFound = -1,
-    kArrayIndexInvalid = -2,
-};
-
-static JsonSize decodeArrayIndex(struct Slice ptr)
-{
-    if (ptr.len <= 0) {
-        // Empty array index.
-        return kArrayIndexNotFound;
-    }
-    if (ptr.len == 1) {
-        // Per RFC 6901, a single '-' refers to the nonexistent element after the last array
-        // element. '-' would be useful for specifying where an element should be inserted, but
-        // is basically meaningless for queries
-        if (ptr.ptr[0] == '-') {
-            return kArrayIndexNotFound;
-        }
-    } else if (ptr.ptr[0] == '0') {
-        // Array index has 1 or more leading zeros.
-        return kArrayIndexInvalid;
-    }
-    static const JsonSize kMaxIndex = (1LL << 61) - 1;
-    // Decode the array index as an unsigned 61-bit integer. We only get 61 bits, because of how
-    // the JsonValue tag field is packed (3 bits are used for the type).
-    JsonSize index = 0;
-    while (ptr.len > 0) {
-        const char c = ptr.ptr[0];
-        if (!ISNUMERIC(c)) {
-            return kArrayIndexInvalid;
-        }
-        // Make sure the index doesn't overflow.
-        if (index > kMaxIndex / 10) {
-            // Multiply by 10 will cause an overflow.
-            return kArrayIndexNotFound;
-        } else if (index == kMaxIndex / 10) {
-            static const int kLastDigit = (int)kMaxIndex % 10 + '0';
-            if (c > kLastDigit) {
-                // Addition of NUMVAL(c) will cause an overflow.
-                return kArrayIndexNotFound;
-            }
-        }
-        index = index * 10 + NUMVAL(c);
-        sliceAdvance(&ptr);
-    }
-    return index;
-}
-
-static enum JsonQueryStatus findNextValue(JsonValue **val, struct Slice ptr)
-{
-    if (!ISCONTAINER(jsonType(*val))) {
-        return kQueryNotFound;
-    }
-    JsonSize index;
-    if (isObject(*val)) {
-        index = jsonObjectFind(*val, ptr.ptr, ptr.len);
-    } else {
-        index = decodeArrayIndex(ptr);
-        if (index == kArrayIndexInvalid) {
-            // Unable to decode the array index.
-            return kQueryPathInvalid;
-        }
-    }
-    *val = jsonContainerGet(*val, index);
-    return *val ? kQueryOk : kQueryNotFound;
-}
-
-// Scratch memory for unescaping JSON pointers
-struct PathBuilder {
-    char *ptr;
-    JsonSize len;
-    JsonSize cap;
-    JsonBool err;
-
-#define PB_SMALL_LENGTH 256
-    // Start out writing to this buffer. If the path gets too long, switch to a heap-allocated
-    // buffer.
-    char small[PB_SMALL_LENGTH];
-};
-
-static void pbCleanup(struct PathBuilder *pb)
-{
-    if (pb->ptr != pb->small) {
-        JSON_FREE(pb->ptr);
-    }
-}
-
-MEWJSON_NODISCARD
-static JsonBool pbEnsureSpace(struct PathBuilder *pb)
-{
-    if (pb->err) {
-        return 0;
-    }
-    const JsonSize len = pb->len + 1;
-    if (len > pb->cap) {
-        if (pb->cap == 0) {
-            pb->cap = PB_SMALL_LENGTH;
-            pb->ptr = pb->small;
-            return 1;
-        }
-        JsonSize cap = 4;
-        while (cap < len) {
-            cap *= 2;
-        }
-        char *ptr = JSON_MALLOC(cap);
-        if (!ptr) {
-            pb->err = 1;
-            return 0;
-        }
-        memcpy(ptr, pb->ptr, pb->len);
-        if (pb->ptr != pb->small) {
-            JSON_FREE(pb->ptr);
-        }
-        pb->ptr = ptr;
-        pb->cap = cap;
-    }
-    return 1;
-}
-
-static void pbAppend(struct PathBuilder *pb, char c)
-{
-    if (pbEnsureSpace(pb)) {
-        pb->ptr[pb->len] = c;
-        ++pb->len;
-    }
-}
-
-MEWJSON_NODISCARD
-static int processPtrToken(struct PathBuilder *pb, struct Slice *ptr)
-{
-    assert(pb->len == 0);
-    assert(ptr->len > 0);
-    assert(ptr->ptr[0] == '/');
-
-    // Skip the '/'
-    sliceAdvance(ptr);
-
-    // Find the next '/' and unescape the current token
-    while (ptr->len > 0) {
-        if (ptr->ptr[0] == '/') {
-            break;
-        } else if (ptr->ptr[0] == '~') {
-            sliceAdvance(ptr);
-            if (ptr->len == 0) {
-                // Missing char after '~'
-                return -1;
-            }
-            if (ptr->ptr[0] == '0') {
-                pbAppend(pb, '~');
-            } else if (ptr->ptr[0] == '1') {
-                pbAppend(pb, '/');
-            } else {
-                // Missing '0' or '1' after '~'
-                return -1;
-            }
-        } else {
-            pbAppend(pb, ptr->ptr[0]);
-        }
-        sliceAdvance(ptr);
-    }
-    return 0;
-}
-
-static JsonSize pointerWriteKey(struct Writer *w, const char *key, JsonSize length)
-{
-    appendChar(w, '/');
-    for (JsonSize i = 0; i < length; ++i) {
-        const char c = key[i];
-        if (c == '/') {
-            appendChar(w, '~');
-            appendChar(w, '1');
-        } else if (c == '~') {
-            appendChar(w, '~');
-            appendChar(w, '0');
-        } else {
-            appendChar(w, c);
-        }
-    }
-    return w->acc;
-}
-
-JsonSize pointerWriteIndex(struct Writer *w, JsonSize index)
-{
-    if (index < 0) {
-        return -1;
-    }
-    appendChar(w, '/');
-    appendInteger(w, index);
-    return w->acc;
-}
-
-JsonSize jsonPointerWriteKey(char *jsonPtr, JsonSize ptrSize, const char *key, JsonSize length)
-{
-    struct Writer w = {.ptr = jsonPtr, .len = ptrSize};
-    return pointerWriteKey(&w, key, length);
-}
-
-JsonSize jsonPointerWriteIndex(char *jsonPtr, JsonSize ptrSize, JsonSize index)
-{
-    struct Writer w = {.ptr = jsonPtr, .len = ptrSize};
-    return pointerWriteIndex(&w, index);
-}
-
-static JsonSize offsetInParent(JsonValue *parent, JsonValue *child)
-{
-    assert(ISCONTAINER(jsonType(parent)));
-    assert(child + child->up == parent);
-    struct JsonCursor c;
-    jsonCursorInit(parent, kCursorNormal, &c);
-    assert(jsonCursorIsValid(&c));
-    for (JsonSize i = 0;; ++i) {
-        if (c.value == child) {
-            return i;
-        }
-        jsonCursorNext(&c);
-    }
-}
-
-MEWJSON_NODISCARD
-static int locateImpl(struct Writer *w, JsonValue *head, JsonValue *leaf)
-{
-    while (head != leaf) {
-        if (!ISCONTAINER(head->tag)) {
-            // Head is not a container, so it cannot contain the target value.
-            return -1;
-        }
-        // Search back from the leaf until the immediate child of head is reached.
-        JsonValue *value = leaf;
-        for (JsonValue *up;; value = up) {
-            up = value + value->up;
-            if (up == head) {
-                break;
-            } else if (up == value) {
-                return -1;
-            }
-        }
-        if (isObject(head)) {
-            const JsonValue *key = value - 1;
-            pointerWriteKey(w, key->v.string, jsonLength(key));
-        } else {
-            pointerWriteIndex(w, offsetInParent(head, value));
-        }
-        head = value;
-    }
-    return 0;
-}
-
-JsonSize jsonLocate(JsonValue *root, char *jsonPtr, JsonSize ptrSize, JsonValue *val)
-{
-    struct Writer w = {
-        .ptr = jsonPtr,
-        .len = ptrSize,
-    };
-    // Fill out the path.
-    if (locateImpl(&w, root, val)) {
-        return -1;
-    }
-    return w.acc;
-}
-
-MEWJSON_NODISCARD
-enum JsonQueryStatus jsonFind(JsonValue *root, const char *jsonPtr, JsonSize ptrSize,
-                              JsonValue **result)
-{
-    struct Slice ptr = SLICE_NEW(jsonPtr, ptrSize);
-    enum JsonQueryStatus rc = kQueryOk;
-    struct PathBuilder pb = {0};
-    *result = NULL;
-    if (ptr.len == 0) {
-        // Empty path means the root node.
-        goto finish;
-    } else if (ptr.ptr[0] != '/') {
-        return kQueryPathInvalid;
-    }
-    do {
-        pb.len = 0; // Reset path builder
-        if (processPtrToken(&pb, &ptr)) {
-            rc = kQueryPathInvalid;
-        } else if (pb.err) {
-            rc = kQueryNoMemory;
-        } else {
-            rc = findNextValue(&root, SLICE_NEW(pb.ptr, pb.len));
-        }
-    } while (ptr.len > 0 && rc == kQueryOk);
-
-finish:
-    if (rc == kQueryOk) {
-        *result = root;
-    }
-    pbCleanup(&pb);
-    return rc;
 }
