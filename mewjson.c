@@ -836,7 +836,7 @@ JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *pa
         parser->status = kParseNoMemory;
         return NULL;
     }
-    memcpy(doc->text, input, length);
+    memcpy(doc->text, input, (size_t)length);
     memset(doc->text + length, EOF, PADDING_LENGTH);
     *doc = (JsonDocument){.a = a};
     parser->x.doc = doc;
