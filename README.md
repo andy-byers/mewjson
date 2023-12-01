@@ -17,7 +17,7 @@ The library requires the following to compile:
 ## API
 mewjson aims to provide a small, convenient API for parsing and validating JSON data.
 
-Initialize a JSON parser object.
+### Initialize a parser
 The second parameter to `jsonParserInit()` is a pointer to `struct JsonHandler`, and the third a pointer to `struct JsonAllocator`.
 If a `struct JsonHandler` is provided, its callback members are called as the document is parsed.
 Otherwise, `jsonParse` will do nothing but validate the document.
@@ -30,8 +30,8 @@ struct JsonHandler h = {/* user-defined callbacks go here */};
 jsonParserInit(&parser, &h, &a); // Must be called prior to jsonParse()
 ```
 
-Parse a JSON document.
-The callbacks in `h` are called as values and structural elements are encountered.
+### Parse a JSON document
+The callbacks in `h` are called as values and structural elements are encountered during the parse.
 The input buffer does not need to be null-terminated.
 ```C
 static const char kJson[] = "[1,[2,[3],4],5]";
