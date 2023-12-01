@@ -15,6 +15,9 @@
 #define LENGTHOF(a) (COUNTOF(a) - 1)
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
+#define JSON_MALLOC(a, size) (a).malloc((size_t)(size))
+#define JSON_REALLOC(a, ptr, size) (a).realloc(ptr, (size_t)(size))
+#define JSON_FREE(a, ptr) (a).free(ptr)
 
 JsonBool defaultAcceptKey(void *ctx, const char *key, JsonSize value)
 {
@@ -24,22 +27,24 @@ JsonBool defaultAcceptKey(void *ctx, const char *key, JsonSize value)
     return 1;
 }
 
-JsonBool defaultAcceptValue(void *ctx, JsonValue *value)
+JsonBool defaultAcceptValue(void *ctx, const JsonValue *value)
 {
     UNUSED(ctx);
     UNUSED(value);
     return 1;
 }
 
-JsonBool defaultBeginContainer(void *ctx)
+JsonBool defaultBeginContainer(void *ctx, JsonBool isObject)
 {
     UNUSED(ctx);
+    UNUSED(isObject);
     return 1;
 }
 
-JsonBool defaultEndContainer(void *ctx)
+JsonBool defaultEndContainer(void *ctx, JsonBool isObject)
 {
     UNUSED(ctx);
+    UNUSED(isObject);
     return 1;
 }
 
@@ -48,10 +53,8 @@ void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct Jso
     static const struct JsonHandler kHandlerPrototype = {
         .acceptKey = defaultAcceptKey,
         .acceptValue = defaultAcceptValue,
-        .beginObject = defaultBeginContainer,
-        .beginArray = defaultBeginContainer,
-        .endObject = defaultEndContainer,
-        .endArray = defaultEndContainer,
+        .beginContainer = defaultBeginContainer,
+        .endContainer = defaultEndContainer,
     };
     static const struct JsonAllocator kAllocatorPrototype = {
         .malloc = malloc,
@@ -62,16 +65,14 @@ void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct Jso
     parser->a = a ? *a : kAllocatorPrototype;
 }
 
-#define JSON_MALLOC(a, size) (a).malloc((size_t)(size))
-#define JSON_REALLOC(a, ptr, size) (a).realloc(ptr, (size_t)(size))
-#define JSON_FREE(a, ptr) (a).free(ptr)
-
 struct JsonValue {
-    // Type and size information for the node
+    // Type of JSON value
     enum JsonType type;
+
+    // Number of bytes in a string, 0 for all other types
     JsonSize size;
 
-    // Data contained in the node
+    // Decoded data associated with the value
     union {
         const char *string;
         int64_t integer;
@@ -80,16 +81,18 @@ struct JsonValue {
     } v;
 };
 
+// State variables used during a parse
 struct ParseState {
+    // Copies of the handler and allocator held by the JsonParser instance
     struct JsonHandler h;
     struct JsonAllocator a;
 
     JsonValue value;
     JsonSize offset;
 
-    // Status code pertaining to the parse. Value is kParseOk on success, kParseStopped if
+    // Status code pertaining to the parse. Value is kStatusOk on success, kStatusStopped if
     // the parser was stopped, and some other value on failure.
-    enum JsonParseStatus status;
+    enum JsonStatus status;
 
     // Stack of nested container types.
     uint8_t *stack;
@@ -97,6 +100,7 @@ struct ParseState {
     JsonSize capacity;
 };
 
+// Constants related to the character class lookup table
 enum {
     kShiftValue = 4,    // xxxx >>>>
     kMaskIsSpace = 1,   // 0000 0001
@@ -125,10 +129,13 @@ static const uint8_t kCharClassTable[256] = {
     0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   0,   0,   0,   0,
 };
 
+// Check for inclusion in one of the character classes
 #define ISSPACE(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsSpace)
 #define ISFPCHAR(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsFp)
 #define ISNUMERIC(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsNumeric)
 #define ISHEX(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsHex)
+
+// Get the integer representation of a numeric or hex digit
 #define NUMVAL(c) (kCharClassTable[(uint8_t)(c)] >> kShiftValue)
 #define HEXVAL(c) (kCharClassTable[(uint8_t)(c)] >> kShiftValue)
 
@@ -201,7 +208,7 @@ static enum Token scanNull(struct ParseState *s, const char **ptr)
         s->value = (JsonValue){.type = kTypeNull};
         return kTokenValue;
     }
-    s->status = kParseLiteralInvalid;
+    s->status = kStatusLiteralInvalid;
     return kTokenError;
 }
 
@@ -213,7 +220,7 @@ static enum Token scanTrue(struct ParseState *s, const char **ptr)
         s->value = (JsonValue){.type = kTypeBoolean, .v = {.boolean = 1}};
         return kTokenValue;
     }
-    s->status = kParseLiteralInvalid;
+    s->status = kStatusLiteralInvalid;
     return kTokenError;
 }
 
@@ -226,7 +233,7 @@ static enum Token scanFalse(struct ParseState *s, const char **ptr)
         s->value = (JsonValue){.type = kTypeBoolean, .v = {.boolean = 0}};
         return kTokenValue;
     }
-    s->status = kParseLiteralInvalid;
+    s->status = kStatusLiteralInvalid;
     return kTokenError;
 }
 
@@ -326,7 +333,7 @@ static enum Token scanString(struct ParseState *s, const char **ptr)
                     case 'u': {
                         int codepoint = getCodepoint(ptr);
                         if (codepoint < 0) {
-                            s->status = kParseStringInvalidCodepoint;
+                            s->status = kStatusStringInvalidCodepoint;
                             return kTokenError;
                         }
                         if (0xD800 <= codepoint && codepoint <= 0xDFFF) {
@@ -334,18 +341,18 @@ static enum Token scanString(struct ParseState *s, const char **ptr)
                             // (U+D800–U+DBFF) followed by a low surrogate (U+DC00–U+DFFF).
                             if (codepoint <= 0xDBFF) {
                                 if (getChar(ptr) != '\\' || getChar(ptr) != 'u') {
-                                    s->status = kParseStringInvalidCodepoint;
+                                    s->status = kStatusStringInvalidCodepoint;
                                     return kTokenError;
                                 }
                                 const int codepoint2 = getCodepoint(ptr);
                                 if (codepoint2 < 0xDC00 || codepoint2 > 0xDFFF) {
-                                    s->status = kParseStringMissingLowSurrogate;
+                                    s->status = kStatusStringMissingLowSurrogate;
                                     return kTokenError;
                                 }
                                 codepoint = (((codepoint - 0xD800) << 10) | (codepoint2 - 0xDC00)) +
                                             0x10000;
                             } else {
-                                s->status = kParseStringMissingHighSurrogate;
+                                s->status = kStatusStringMissingHighSurrogate;
                                 return kTokenError;
                             }
                         }
@@ -369,24 +376,27 @@ static enum Token scanString(struct ParseState *s, const char **ptr)
                         break;
                     }
                     default:
-                        s->status = kParseStringInvalidEscape;
+                        s->status = kStatusStringInvalidEscape;
                         return kTokenError;
                 }
                 break;
             case '"': {
                 // Closing double quote finishes the string.
-                s->value =
-                    (JsonValue){.type = kTypeString, .size = out - begin, .v = {.string = begin}};
+                s->value = (JsonValue){
+                    .type = kTypeString,
+                    .size = out - begin,
+                    .v = {.string = begin},
+                };
                 return kTokenString;
             }
             default:
                 if ((uint8_t)c < 0x20) {
-                    s->status = kParseStringUnescapedControl;
+                    s->status = kStatusStringUnescapedControl;
                     return kTokenError;
                 } else if ((uint8_t)c < 0x80) {
                     *out++ = c;
                 } else if (scanUtf8(ptr, &out, c)) {
-                    s->status = kParseStringInvalidUtf8;
+                    s->status = kStatusStringInvalidUtf8;
                     return kTokenError;
                 }
         }
@@ -415,7 +425,7 @@ static enum Token scanReal(struct ParseState *s, const char **ptr, JsonBool isNe
         getChar(ptr);
         // Consume the fractional part.
         if (!ISNUMERIC(peekChar(ptr))) {
-            s->status = kParseNumberMissingFraction;
+            s->status = kStatusNumberMissingFraction;
             return kTokenError;
         }
         while (ISNUMERIC(peekChar(ptr))) {
@@ -431,7 +441,7 @@ static enum Token scanReal(struct ParseState *s, const char **ptr, JsonBool isNe
             getChar(ptr);
         }
         if (!ISNUMERIC(peekChar(ptr))) {
-            s->status = kParseNumberMissingExponent;
+            s->status = kStatusNumberMissingExponent;
             return kTokenError;
         }
         while (ISNUMERIC(peekChar(ptr))) {
@@ -440,7 +450,8 @@ static enum Token scanReal(struct ParseState *s, const char **ptr, JsonBool isNe
     }
     // Input has been padded with at least 1 byte that strtod() will not recognize as being part
     // of a real number. Otherwise, strtod() might continue reading past the end of the buffer.
-    s->value = (JsonValue){.type = kTypeReal, .v = {.real = strtod(begin, NULL)}};
+    const double real = strtod(begin, NULL);
+    s->value = (JsonValue){.type = kTypeReal, .v = {.real = real}};
     return kTokenValue;
 }
 
@@ -459,15 +470,15 @@ static enum Token scanNumber(struct ParseState *s, const char **ptr, JsonBool is
     }
     ungetChar(ptr);
 
-    int64_t integer = 0;
+    int64_t value = 0;
     while (ISNUMERIC(peekChar(ptr))) {
-        const unsigned v = NUMVAL(getChar(ptr));
-        if (integer > INT64_MAX / 10) {
+        const uint32_t v = NUMVAL(getChar(ptr));
+        if (value > INT64_MAX / 10) {
             // This number is definitely too large to be represented as an int64_t (the
             // "value * 10" below will cause signed integer overflow. Parse it as a double
             // instead.
             goto call_scan_real;
-        } else if (integer == INT64_MAX / 10) {
+        } else if (value == INT64_MAX / 10) {
             // This number might be too large (the "+ v" below might cause an overflow).
             // Handle the special cases (modified from SQLite). Note that INT64_MAX is equal
             // to 9223372036854775807. In this branch, v is referring to the least-significant
@@ -482,13 +493,13 @@ static enum Token scanNumber(struct ParseState *s, const char **ptr, JsonBool is
                 goto call_scan_real;
             }
         }
-        integer = integer * 10 + v;
+        value = value * 10 + v;
     }
 
     if (!ISFPCHAR(peekChar(ptr))) {
-        assert(integer != INT64_MIN);
-        integer = isNegative ? -integer : integer;
-        s->value = (JsonValue){.type = kTypeInteger, .v = {.integer = integer}};
+        assert(value != INT64_MIN);
+        value = isNegative ? -value : value;
+        s->value = (JsonValue){.type = kTypeInteger, .v = {.integer = value}};
         return kTokenValue;
     }
 
@@ -496,7 +507,7 @@ call_scan_real:
     *ptr = begin;
     return scanReal(s, ptr, isNegative);
 return_with_error:
-    s->status = kParseNumberInvalid;
+    s->status = kStatusNumberInvalid;
     return kTokenError;
 }
 
@@ -519,7 +530,7 @@ static enum Token scanToken(struct ParseState *s, const char **ptr)
         case '7':
         case '8':
         case '9':
-            ungetChar(ptr);
+            ungetChar(ptr); // Let scanNumber() read the first digit
             return scanNumber(s, ptr, 0);
         case 'n':
             return scanNull(s, ptr);
@@ -542,7 +553,7 @@ static enum Token scanToken(struct ParseState *s, const char **ptr)
         case EOF:
             return kTokenEndOfInput;
         default:
-            s->status = kParseSyntaxError;
+            s->status = kStatusSyntaxError;
             return kTokenError;
     }
 }
@@ -620,7 +631,7 @@ static int parserBeginContainer(struct ParseState *s, JsonBool isObject)
 {
     struct JsonAllocator *a = &s->a;
     if (s->depth >= MEWJSON_MAX_DEPTH) {
-        s->status = kParseExceededMaxDepth;
+        s->status = kStatusExceededMaxDepth;
         return -1;
     }
     if (s->depth >= s->capacity) {
@@ -630,7 +641,7 @@ static int parserBeginContainer(struct ParseState *s, JsonBool isObject)
         }
         uint8_t *stack = JSON_REALLOC(*a, s->stack, cap * SIZEOF(s->stack[0]));
         if (!stack) {
-            s->status = kParseNoMemory;
+            s->status = kStatusNoMemory;
             return -1;
         }
         s->stack = stack;
@@ -649,6 +660,9 @@ static enum State parserEndContainer(struct ParseState *s)
     // function will never be called unless parserBeginContainer() was called at some point.
     assert(s->depth > 0);
     --s->depth;
+    if (!h->endContainer(h->ctx, s->stack[s->depth])) {
+        return kStateStop;
+    }
     if (s->depth > 0) {
         // Pretend like the parser just finished reading an object member value or an array
         // element. Essentially, we are considering the whole object or array that we just
@@ -656,10 +670,6 @@ static enum State parserEndContainer(struct ParseState *s)
         // the grandparent, because the kOE token has not been accepted yet (acceptToken()
         // below). The parser control is technically still inside the object or array
         // presently being closed.
-        const JsonBool rc = s->stack[s->depth] ? h->endObject(h->ctx) : h->endArray(h->ctx);
-        if (!rc) {
-            return kStateStop;
-        }
         return s->stack[s->depth - 1] ? kO2 : kA1;
     }
     // Just closed the root-level structure, so we must be finished. It is an error
@@ -671,7 +681,7 @@ static enum State parserAcceptKey(struct ParseState *s, enum State dst)
 {
     struct JsonHandler *h = &s->h;
     JsonValue *v = &s->value;
-    const JsonBool rc = h->acceptKey(h->ctx, v->v.string, jsonLength(v));
+    const JsonBool rc = h->acceptKey(h->ctx, v->v.string, v->size);
     return rc ? dst : kStateStop;
 }
 
@@ -681,11 +691,9 @@ static enum State parserAcceptValue(struct ParseState *s, enum State dst)
     JsonValue *value = &s->value;
     JsonBool rc;
     switch (dst) {
-        case kAB:
-            rc = h->beginArray(h->ctx);
-            break;
         case kOB:
-            rc = h->beginObject(h->ctx);
+        case kAB:
+            rc = h->beginContainer(h->ctx, dst == kOB);
             break;
         default:
             rc = h->acceptValue(h->ctx, value);
@@ -709,10 +717,10 @@ static enum State transitState(struct ParseState *s, enum State dst)
         case kO1:
             // Indicate that the current node is an object member key.
             return parserAcceptKey(s, dst);
-        case kAE:
         case kOE:
+        case kAE:
             // Leaving a nested container. Correct the state based on the type of container that
-            // the parser control has entered.
+            // the parser control has returned into.
             return parserEndContainer(s);
         case kV1:
         case kA1:
@@ -734,7 +742,7 @@ static enum State transitState(struct ParseState *s, enum State dst)
 
 static enum Token parserAdvance(struct ParseState *s, const char **ptr)
 {
-    if (s->status == kParseOk) {
+    if (s->status == kStatusOk) {
         return scanToken(s, ptr);
     }
     return kTokenError;
@@ -744,10 +752,10 @@ static int parserFinish(struct ParseState *s, enum State state, const char **ptr
 {
     skipWhitespace(ptr);
     if (state == kStateStop) {
-        s->status = kParseStopped;
+        s->status = kStatusStopped;
         return 0;
     }
-    if (s->status != kParseOk) {
+    if (s->status != kStatusOk) {
         return -1;
     }
     if (s->depth != 0) {
@@ -755,12 +763,12 @@ static int parserFinish(struct ParseState *s, enum State state, const char **ptr
         // the last container has been closed, the parser transitions into the end state, a
         // sink state, and refuses to accept any more tokens.
         assert(s->depth > 0);
-        s->status = kParseContainerNotClosed;
+        s->status = kStatusContainerNotClosed;
         return -1;
     }
     if (state != kStateEnd) {
         // Non-specific syntax error.
-        s->status = kParseSyntaxError;
+        s->status = kStatusSyntaxError;
         return -1;
     }
     return 0;
@@ -781,14 +789,14 @@ static int parserParse(struct ParseState *s, const char **ptr)
 static void parserFinalize(struct ParseState *s, JsonSize offset, JsonSize length)
 {
     s->offset = MIN(offset, length);
-    if (s->status != kParseOk) {
+    if (s->status != kStatusOk) {
         return;
     }
     // The char * used to iterate over the input buffer should be 1 or more bytes past
     // the first padding byte (skipWhitespace() is called in parserFinish() to skip past
     // trailing whitespace). Otherwise, there is junk at the end of the input.
     if (offset <= length) {
-        s->status = kParseSyntaxError;
+        s->status = kStatusSyntaxError;
     }
 }
 
@@ -796,15 +804,27 @@ static void parserFinalize(struct ParseState *s, JsonSize offset, JsonSize lengt
 #define PADDING_LENGTH 4
 
 MEWJSON_NODISCARD
-enum JsonParseStatus jsonParse(const char *input, JsonSize length, struct JsonParser *parser)
+enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser *parser)
 {
     struct JsonHandler h = parser->h;
     struct JsonAllocator a = parser->a;
     struct ParseState s = {.h = h, .a = a};
     parser->offset = -1;
+
+    // Allocate a padded buffer to hold the input text. This serves several purposes:
+    // 1. Allows scanReal() to call strtod() directly on the input buffer, even if the real number
+    //    being parsed is adjacent to the end of the buffer (original buffer is not necessarily
+    //    null-terminated).
+    // 2. Allows strings to be escaped in-place. This works because an unescaped string is always
+    //    shorter than an escaped string.
+    // 3. Eliminates an extra check to see if we have reached the end of the buffer before reading
+    //    the next character. The parser already switches on the next character, so we just emit a
+    //    kTokenEndOfInput token when we encounter an EOF byte. Of course, we also need to check to
+    //    make sure we have reached the end of the buffer to handle embedded EOFs, but that happens
+    //    just once, at the end.
     char *text = JSON_MALLOC(a, length + PADDING_LENGTH);
     if (!text) {
-        return kParseNoMemory;
+        return kStatusNoMemory;
     }
     memcpy(text, input, (size_t)length);
     memset(text + length, EOF, PADDING_LENGTH);
@@ -813,6 +833,8 @@ enum JsonParseStatus jsonParse(const char *input, JsonSize length, struct JsonPa
     const char *ptr = text;
     parserParse(&s, &ptr);
     parserFinalize(&s, ptr - text, length);
+
+    // Save the offset that the parser left off on and cleanup.
     parser->offset = s.offset;
     JSON_FREE(a, s.stack);
     JSON_FREE(a, text);
@@ -824,9 +846,12 @@ enum JsonType jsonType(const JsonValue *val)
     return val->type;
 }
 
-const char *jsonString(const JsonValue *val)
+const char *jsonString(const JsonValue *val, JsonSize *length)
 {
     assert(jsonType(val) == kTypeString);
+    if (length) {
+        *length = val->size;
+    }
     return val->v.string;
 }
 
@@ -846,9 +871,4 @@ JsonBool jsonBoolean(const JsonValue *val)
 {
     assert(jsonType(val) == kTypeBoolean);
     return val->v.boolean;
-}
-
-JsonSize jsonLength(const JsonValue *val)
-{
-    return val->size;
 }

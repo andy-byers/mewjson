@@ -20,10 +20,10 @@ extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     struct JsonParser parser;
     jsonParserInit(&parser, NULL, NULL);
     // Read straight from the input buffer.
-    const enum JsonParseStatus s = jsonParse((const char *)data, (JsonSize)size, &parser);
-    if (s != kParseOk) {
+    const enum JsonStatus s = jsonParse((const char *)data, (JsonSize)size, &parser);
+    if (s != kStatusOk) {
         // Must be some type of corruption.
-        CHECK(s != kParseNoMemory);
+        CHECK(s != kStatusNoMemory);
     }
     return 0;
 }

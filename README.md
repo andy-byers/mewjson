@@ -9,6 +9,11 @@ The library requires the following to compile:
 + CMake version 3.14 or later
 + C compiler with support for C99
 
+## Caveats
++ Only supports SAX-style (callback-based) parsing
++ Parser uses dynamic memory
++ Real number parsing is very slow (uses `strtod()`)
+
 ## API
 mewjson aims to provide a small, convenient API for parsing and validating JSON data.
 
@@ -30,8 +35,8 @@ The callbacks in `h` are called as values and structural elements are encountere
 The input buffer does not need to be null-terminated.
 ```C
 static const char kJson[] = "[1,[2,[3],4],5]";
-enum JsonParseStatus s = jsonParse(kJson, (JsonSize)strlen(kJson), &parser);
-if (s != kParseOk) {
+enum JsonStatus s = jsonParse(kJson, (JsonSize)strlen(kJson), &parser);
+if (s != kStatusOk) {
     // The s variable indicates what went wrong, and parser.offset indicates where in the
     // input buffer the parser stopped.
     fprintf(stderr, "parser error %d at offset %ld\n",

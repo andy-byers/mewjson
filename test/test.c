@@ -21,6 +21,10 @@
 #define CAT(x, y) XSTR(x##y)
 
 static JsonSize sBytesUsed = 0;
+static char sWriteBuf[16384];
+static char *sWritePtr;
+static int sStopType;
+enum { kStopAcceptKey = kTypeCount, kStopBeginContainer, kStopEndContainer, kStopTypeCount };
 
 void *leakCheckMalloc(size_t size)
 {
@@ -103,6 +107,164 @@ static void testFree(void *ptr)
 {
     leakCheckFree(ptr);
 }
+
+static struct JsonAllocator sAllocator = {
+    testMalloc,
+    testRealloc,
+    testFree,
+};
+
+// Modified from SQLite (src/json.c).
+static void appendEscapedString(const char *str, JsonSize len)
+{
+    *sWritePtr++ = '"';
+    for (JsonSize i = 0; i < len; i++) {
+        uint8_t c = ((uint8_t *)str)[i];
+        if (c == '"' || c == '\\') {
+json_simple_escape:
+            *sWritePtr++ = '\\';
+        } else if (c <= 0x1F) {
+            static const char kSpecialChars[] = {
+                0, 0, 0, 0, 0, 0, 0, 0, 'b', 't', 'n', 0, 'f', 'r', 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0,   0,   0,   0, 0,   0,   0, 0,
+            };
+            CHECK(COUNTOF(kSpecialChars) == 32);
+            CHECK(kSpecialChars['\b'] == 'b');
+            CHECK(kSpecialChars['\f'] == 'f');
+            CHECK(kSpecialChars['\n'] == 'n');
+            CHECK(kSpecialChars['\r'] == 'r');
+            CHECK(kSpecialChars['\t'] == 't');
+            if (kSpecialChars[c]) {
+                c = (uint8_t)kSpecialChars[c];
+                goto json_simple_escape;
+            }
+            *sWritePtr++ = '\\';
+            *sWritePtr++ = 'u';
+            *sWritePtr++ = '0';
+            *sWritePtr++ = '0';
+            *sWritePtr++ = (char)('0' + (c >> 4));
+            c = (uint8_t) "0123456789abcdef"[c & 0xF];
+        }
+        *sWritePtr++ = (char)c;
+    }
+    *sWritePtr++ = '"';
+}
+
+static void testWriteValue(const JsonValue *value)
+{
+    switch (jsonType(value)) {
+        case kTypeString: {
+            JsonSize len;
+            const char *str = jsonString(value, &len);
+            appendEscapedString(str, len);
+            break;
+        }
+        case kTypeInteger:
+            sWritePtr += sprintf(sWritePtr, "%lld", jsonInteger(value));
+            break;
+        case kTypeBoolean:
+            if (jsonBoolean(value)) {
+                *sWritePtr++ = 't';
+                *sWritePtr++ = 'r';
+                *sWritePtr++ = 'u';
+                *sWritePtr++ = 'e';
+            } else {
+                *sWritePtr++ = 'f';
+                *sWritePtr++ = 'a';
+                *sWritePtr++ = 'l';
+                *sWritePtr++ = 's';
+                *sWritePtr++ = 'e';
+            }
+            break;
+        case kTypeReal:
+            if (isfinite(jsonReal(value))) {
+                const char *ptr = sWritePtr;
+                sWritePtr += sprintf(sWritePtr, "%g", jsonReal(value));
+                // Add ".0" to the end of the number if there are no other "floating-point"
+                // indicators present. Makes sure the number is recognized as a real next time.
+                JsonBool foundFp = 0;
+                for (; ptr != sWritePtr; ++ptr) {
+                    if (*ptr == '.' || *ptr == 'e' || *ptr == 'E') {
+                        foundFp = 1;
+                        break;
+                    }
+                }
+                if (!foundFp) {
+                    *sWritePtr++ = '.';
+                    *sWritePtr++ = '0';
+                }
+                break;
+            }
+            // Intentional fallthrough: convert +/-Inf into null.
+        default: // kTypeNull
+            *sWritePtr++ = 'n';
+            *sWritePtr++ = 'u';
+            *sWritePtr++ = 'l';
+            *sWritePtr++ = 'l';
+            break;
+    }
+}
+
+static void testMaybeAddComma(void)
+{
+    if (sWritePtr == sWriteBuf) {
+        return; // First token
+    }
+    if (sWritePtr[-1] != '{' && sWritePtr[-1] != '[' && sWritePtr[-1] != ':') {
+        *sWritePtr++ = ',';
+    }
+}
+
+static JsonBool testAcceptKey(void *ctx, const char *key, JsonSize length)
+{
+    testMaybeAddComma();
+    appendEscapedString(key, length);
+    *sWritePtr++ = ':';
+    (void)ctx;
+    return sStopType != kStopAcceptKey;
+}
+
+static JsonBool testAcceptValue(void *ctx, const JsonValue *value)
+{
+    testMaybeAddComma();
+    testWriteValue(value);
+    (void)ctx;
+    return sStopType != (int)jsonType(value);
+}
+
+static JsonBool testBeginContainer(void *ctx, JsonBool isObject)
+{
+    testMaybeAddComma();
+    if (isObject) {
+        *sWritePtr++ = '{';
+    } else {
+        *sWritePtr++ = '[';
+    }
+    (void)ctx;
+    return sStopType != kStopBeginContainer;
+}
+
+static JsonBool testEndContainer(void *ctx, JsonBool isObject)
+{
+    CHECK(sWritePtr != sWriteBuf);
+    if (sWritePtr[-1] == ',') {
+        --sWritePtr; // Overwrite last value separator
+    }
+    if (isObject) {
+        *sWritePtr++ = '}';
+    } else {
+        *sWritePtr++ = ']';
+    }
+    (void)ctx;
+    return sStopType != kStopEndContainer;
+}
+
+static struct JsonHandler sHandler = {
+    .acceptKey = testAcceptKey,
+    .acceptValue = testAcceptValue,
+    .beginContainer = testBeginContainer,
+    .endContainer = testEndContainer,
+};
 
 static const char *kNoTestNames[] = {
     "n_array_1_true_without_comma",
@@ -556,57 +718,46 @@ static struct Testcase {
     enum TestcaseType {
         kTestcaseNo,
         kTestcaseYes,
-        kTestcaseYesInteger,
-        kTestcaseYesReal,
     } type;
-    union TestcaseValue {
-        int64_t integer;
-        double real;
-    } value;
 } sInternalTestcases[] = {
 #define YES(a, b) {.name = CAT(y_, a), .input = b, .inputLen = (JsonSize)strlen(b), .type = kTestcaseYes},
     YES(structure_complicated, "[{\"a\":[{}]},{\"b\":[{\"c\":[[],[],[true]],\"d\":null}]}]")
     YES(array_nested, "[1,[2,[3,4],5,[6,7],8],9,[10,[11,12],13,[14,15],16],17]")
-
-#define YES_INTEGER(a, b, c) {.name = CAT(y_, a), .input = b, .inputLen = (JsonSize)strlen(b), .type = kTestcaseYesInteger, .value = (union TestcaseValue){.integer = c}},
-    YES_INTEGER(number_simple_int, "123", 123)
-    YES_INTEGER(number_negative_int, "-123", -123)
-    YES_INTEGER(number_after_space, " 4", 4)
-    YES_INTEGER(number_negative_one, "-1", -1)
-    YES_INTEGER(number_negative_zero, "-0", 0)
-    YES_INTEGER(number_integer_min, "-9223372036854775808", INT64_MIN)
-    YES_INTEGER(number_integer_max, "9223372036854775807", INT64_MAX)
-    YES_INTEGER(number_integer_small, "-9223372036854775807", INT64_MIN + 1)
-
-#define YES_REAL(a, b, c) {.name = CAT(y_, a), .input = b, .inputLen = (JsonSize)strlen(b), .type = kTestcaseYesReal, .value = (union TestcaseValue){.real = c}},
-    YES_REAL(structure_lonely_negative_real, "-0.1", -0.1)
-    YES_REAL(number_simple_real, "123.456789", 123.456789)
-    YES_REAL(number_real_positive_exponent, "1e+2", 1e+2)
-    YES_REAL(number_real_negative_exponent, "1e-2", 1e-2)
-    YES_REAL(number_real_small, "-1.0e+28", -1.0e+28)
-    YES_REAL(number_real_large_1, "1.0e+28", 1.0e+28)
-    YES_REAL(number_real_large_2, "123e45", 123e45)
-    YES_REAL(number_real_large_3, "123e65", 123e65)
-    YES_REAL(number_real_close_to_zero,
-             "-0.000000000000000000000000000000000000000000000000000000000000000000000000000001",
-             -0.000000000000000000000000000000000000000000000000000000000000000000000000000001)
-    YES_REAL(number_integer_with_exponent, "20e1", 20e1) // Becomes a real
-    YES_REAL(number_real_capital_e_pos_exponent, "1E+2", 1E+2)
-    YES_REAL(number_real_capital_e, "1E22", 1E22)
-    YES_REAL(number_real_fraction_exponent, "123.456e78", 123.456e78)
-    YES_REAL(number_real_capital_e_negative_exponent, "1E-2", 1E-2)
-    YES_REAL(number_0e+1, "0e+1", 0e+1)
-    YES_REAL(number_0e-1, "0e-1", 0e-1)
-    YES_REAL(number_0e1, "0e1", 0e1)
-    YES_REAL(number_underflowing_integer_becomes_real_1, "-9223372036854775809", -9223372036854775809.0)
-    YES_REAL(number_underflowing_integer_becomes_real_2, "-92233720368547758080", -92233720368547758080.0)
-    YES_REAL(number_overflowing_integer_becomes_real_1, "9223372036854775808", 9223372036854775808.0)
-    YES_REAL(number_overflowing_integer_becomes_real_2, "9223372036854775809", 9223372036854775809.0)
-    YES_REAL(number_overflowing_integer_becomes_real_3, "92233720368547758199", 92233720368547758199.0)
-    YES_REAL(number_exponent_with_leading_zero, "1.23e01", 1.23e01)
-    YES_REAL(number_exponent_with_leading_zero_and_sign, "1.23e+01", 1.23e+01)
-    YES_REAL(number_tiny_negative_real, "-1.0e-123", -1.0e-123)
-    YES_REAL(number_negative_zero, "-0.0", -0.0)
+    YES(number_simple_int, "123")
+    YES(number_negative_int, "-123")
+    YES(number_after_space, " 4")
+    YES(number_negative_one, "-1")
+    YES(number_negative_zero, "-0")
+    YES(number_integer_min, "-9223372036854775808")
+    YES(number_integer_max, "9223372036854775807")
+    YES(number_integer_small, "-9223372036854775807")
+    YES(structure_lonely_negative_real, "-0.1")
+    YES(number_simple_real, "123.456789")
+    YES(number_real_positive_exponent, "1e+2")
+    YES(number_real_negative_exponent, "1e-2")
+    YES(number_real_small, "-1.0e+28")
+    YES(number_real_large_1, "1.0e+28")
+    YES(number_real_large_2, "123e45")
+    YES(number_real_large_3, "123e65")
+    YES(number_real_close_to_zero,
+        "-0.000000000000000000000000000000000000000000000000000000000000000000000000000001")
+    YES(number_integer_with_exponent, "20e1") // Becomes a real
+    YES(number_real_capital_e_pos_exponent, "1E+2")
+    YES(number_real_capital_e, "1E22")
+    YES(number_real_fraction_exponent, "123.456e78")
+    YES(number_real_capital_e_negative_exponent, "1E-2")
+    YES(number_0e+1, "0e+1")
+    YES(number_0e-1, "0e-1")
+    YES(number_0e1, "0e1")
+    YES(number_underflowing_integer_becomes_real_1, "-9223372036854775809")
+    YES(number_underflowing_integer_becomes_real_2, "-92233720368547758080")
+    YES(number_overflowing_integer_becomes_real_1, "9223372036854775808")
+    YES(number_overflowing_integer_becomes_real_2, "9223372036854775809")
+    YES(number_overflowing_integer_becomes_real_3, "92233720368547758199")
+    YES(number_exponent_with_leading_zero, "1.23e01")
+    YES(number_exponent_with_leading_zero_and_sign, "1.23e+01")
+    YES(number_tiny_negative_real, "-1.0e-123")
+    YES(number_negative_zero, "-0.0")
 
 #define NO(a, b) {.name = CAT(n_, a), .input = b, .inputLen = (JsonSize)strlen(b), .type = kTestcaseNo},
     NO(string_missing_high_surrogate, "\"\\uDC00\"")
@@ -637,20 +788,17 @@ static void sanityCheckRealEquality(void)
     CHECK(!areRealsEqual(NAN, NAN));
 }
 
-static void testParserInit(struct JsonParser *parser)
+static void testParserInit(struct JsonParser *parser, JsonBool useHandler)
 {
-    jsonParserInit(parser, NULL,
-                   &(struct JsonAllocator){
-                       testMalloc,
-                       testRealloc,
-                       testFree,
-                   });
+    jsonParserInit(parser, useHandler ? &sHandler : NULL, &sAllocator);
 }
 
 static void testcaseInit(const char *name)
 {
     puts(name);
+    sWritePtr = sWriteBuf;
     sOomCounter = -1;
+    sStopType = -1;
 }
 
 // Modified from https://json.org/example.html. Extra nested containers added in a
@@ -756,77 +904,43 @@ static void testcaseReaderOom(void)
 {
     testcaseInit("reader_oom");
     struct JsonParser parser;
-    testParserInit(&parser);
+    testParserInit(&parser, 0);
 
     int failures = 0;
     for (;; ++failures) {
         sOomCounter = failures;
-        const enum JsonParseStatus s =
-            jsonParse(kOomExample, (JsonSize)strlen(kOomExample), &parser);
-        if (s == kParseOk) {
+        const enum JsonStatus s = jsonParse(kOomExample, (JsonSize)strlen(kOomExample), &parser);
+        if (s == kStatusOk) {
             break;
         }
-        CHECK(s == kParseNoMemory);
+        CHECK(s == kStatusNoMemory);
     }
     // Will likely end up failing quite a bit more than 2 times. Just a sanity check.
     CHECK(failures > 2);
 }
-
-// static void attemptRoundtrip(struct JsonParser *parser, JsonDocument **doc)
-//{
-//     JsonValue *v1 = jsonRoot(*doc);
-//
-//     // Determine how many bytes are needed to store the serialized document and allocate a buffer
-//     // to write it into.
-//     const JsonSize n = jsonWrite(NULL, 0, v1);
-//     CHECK(n > 0); // Valid document is never empty
-//     char *result = leakCheckMalloc((size_t)n + 1);
-//     CHECK(result);
-//
-//     // Write the JSON text.
-//     CHECK(n == jsonWrite(result, n, v1));
-//     jsonDestroyDocument(*doc);
-//
-//     // Parse the JSON we just wrote.
-//     JsonDocument *doc2 = jsonParse(result, n, parser);
-//     CHECK(doc2);
-//
-//     // Write the JSON we just parsed to a different buffer.
-//     char *result2 = leakCheckMalloc((size_t)n + 1);
-//     CHECK(result2);
-//     CHECK(n == jsonWrite(result2, n, jsonRoot(doc2)));
-//
-//     // The JSON text we wrote should match exactly.
-//     CHECK(0 == memcmp(result, result2, (size_t)n));
-//
-//     leakCheckFree(result);
-//     leakCheckFree(result2);
-//     *doc = doc2;
-// }
 
 static void testcaseRun(struct Testcase *tc)
 {
     testcaseInit(tc->name);
 
     struct JsonParser parser;
-    testParserInit(&parser);
-    const enum JsonParseStatus s = jsonParse(tc->input, tc->inputLen, &parser);
+    testParserInit(&parser, tc->type != kTestcaseNo);
+    enum JsonStatus s = jsonParse(tc->input, tc->inputLen, &parser);
     if (tc->type == kTestcaseNo) {
         // Must fail for a reason other than running out of memory. OOM conditions are tested
         // separately (see TestcaseReaderOom()).
-        CHECK(s != kParseNoMemory);
-        return;
+        CHECK(s != kStatusNoMemory);
+    } else {
+        // Roundtrip the JSON data.
+        const JsonSize writeLength = sWritePtr - sWriteBuf;
+        char *result = malloc((size_t)writeLength);
+        memcpy(result, sWriteBuf, writeLength);
+        sWritePtr = sWriteBuf;
+        s = jsonParse(result, writeLength, &parser);
+        CHECK(kStatusOk == s);
+        CHECK(0 == memcmp(sWriteBuf, result, (size_t)writeLength));
+        free(result);
     }
-    CHECK(s == kParseOk);
-    //    attemptRoundtrip(&parser, &doc);
-    //    JsonValue *v = jsonRoot(doc);
-    //    if (tc->type == kTestcaseYesInteger) {
-    //        CHECK(jsonType(v) == kTypeInteger);
-    //        CHECK(jsonInteger(v) == tc->value.integer);
-    //    } else if (tc->type == kTestcaseYesReal) {
-    //        CHECK(jsonType(v) == kTypeReal);
-    //        CHECK(areRealsEqual(jsonReal(v), tc->value.real));
-    //    }
 }
 
 static void testcaseLargeNumbers(void)
@@ -835,16 +949,8 @@ static void testcaseLargeNumbers(void)
     static const char kText[] = "[-1e1111,1e1111]";
 
     struct JsonParser parser;
-    testParserInit(&parser);
-    CHECK(kParseOk == jsonParse(kText, (JsonSize)strlen(kText), &parser));
-
-    //    JsonValue *arr = jsonRoot(doc);
-    //    JsonValue *a = jsonContainerGet(arr, 0);
-    //    JsonValue *b = jsonContainerGet(arr, 1);
-    //    CHECK(jsonType(a) == kTypeReal);
-    //    CHECK(areRealsEqual(jsonReal(a), -INFINITY));
-    //    CHECK(jsonType(b) == kTypeReal);
-    //    CHECK(areRealsEqual(jsonReal(b), INFINITY));
+    testParserInit(&parser, 0);
+    CHECK(kStatusOk == jsonParse(kText, (JsonSize)strlen(kText), &parser));
 }
 
 static void testcaseExceedMaxDepth(void)
@@ -858,29 +964,9 @@ static void testcaseExceedMaxDepth(void)
     buffer[kDepth] = '\0';
 
     struct JsonParser parser;
-    testParserInit(&parser);
-    CHECK(kParseExceededMaxDepth == jsonParse(buffer, (JsonSize)strlen(buffer), &parser));
+    testParserInit(&parser, 0);
+    CHECK(kStatusExceededMaxDepth == jsonParse(buffer, (JsonSize)strlen(buffer), &parser));
     leakCheckFree(buffer);
-}
-
-// Make sure the parser stops at the end of the input buffer. For this test to work
-// properly, we have to make sure that strtod() doesn't run past the section of
-// buffer made available to jsonRead(). If the number is adjacent to the end of the
-// buffer, we have to copy it to a separate buffer and write a '\0'.
-static void testcaseDigitsPastEndOfInput(void)
-{
-    testcaseInit("digits_past_end_of_input");
-    //    const double kResult[] = {
-    //        0.2, 0.23, 0.234, 0.2345, 0.23456, 0.234567, 0.2345678, 0.23456789,
-    //    };
-    //    const char kText[] = "0.23456789";
-
-    struct JsonParser parser;
-    testParserInit(&parser);
-    //    for (JsonSize i = 3; i < 10; ++i) {
-    //        CHECK(kParseOk == jsonParse(kText, i, &parser));
-    //        CHECK(areRealsEqual(jsonReal(jsonRoot(doc)), kResult[i - 3]));
-    //    }
 }
 
 static void testcaseParseErrors(void)
@@ -888,36 +974,47 @@ static void testcaseParseErrors(void)
     testcaseInit("parse_errors");
 
     static const struct {
-        enum JsonParseStatus reason;
+        enum JsonStatus reason;
         const char *text;
         JsonBool zeroOffset;
     } kInputs[] = {
-        // Skip kParseOk
-        // Skip kParseNoMemory
-        // Skip kParseExceededMaxDepth
-        {.reason = kParseStringInvalidEscape, .text = "\"\\xFF\""},
-        {.reason = kParseStringInvalidCodepoint, .text = "\"\\uXYZW\""},
-        {.reason = kParseStringMissingLowSurrogate, .text = "\"\\uD800\\uD800\""},
-        {.reason = kParseStringMissingHighSurrogate, .text = "\"\\uDC00\""},
-        {.reason = kParseStringUnescapedControl, .text = "\"\x01\""},
-        {.reason = kParseStringInvalidUtf8, .text = "\"\xED\xA0\x80\""},
-        {.reason = kParseLiteralInvalid, .text = "tru"},
-        {.reason = kParseNumberMissingExponent, .text = "1.23e"},
-        {.reason = kParseNumberMissingFraction, .text = "1.e23"},
-        {.reason = kParseNumberInvalid, .text = "0123"},
-        {.reason = kParseContainerNotClosed, .text = "[{}"},
-        {.reason = kParseContainerNotClosed, .text = "["},
-        {.reason = kParseSyntaxError, .text = "[]123"},
-        {.reason = kParseSyntaxError, .text = "", .zeroOffset = 1},
-        {.reason = kParseSyntaxError, .text = " "},
+        // Skip kStatusOk
+        // Skip kStatusNoMemory
+        // Skip kStatusExceededMaxDepth
+        {.reason = kStatusStringInvalidEscape, .text = "\"\\xFF\""},
+        {.reason = kStatusStringInvalidCodepoint, .text = "\"\\uXYZW\""},
+        {.reason = kStatusStringMissingLowSurrogate, .text = "\"\\uD800\\uD800\""},
+        {.reason = kStatusStringMissingHighSurrogate, .text = "\"\\uDC00\""},
+        {.reason = kStatusStringUnescapedControl, .text = "\"\x01\""},
+        {.reason = kStatusStringInvalidUtf8, .text = "\"\xED\xA0\x80\""},
+        {.reason = kStatusLiteralInvalid, .text = "tru"},
+        {.reason = kStatusNumberMissingExponent, .text = "1.23e"},
+        {.reason = kStatusNumberMissingFraction, .text = "1.e23"},
+        {.reason = kStatusNumberInvalid, .text = "0123"},
+        {.reason = kStatusContainerNotClosed, .text = "[{}"},
+        {.reason = kStatusContainerNotClosed, .text = "["},
+        {.reason = kStatusSyntaxError, .text = "[]123"},
+        {.reason = kStatusSyntaxError, .text = "", .zeroOffset = 1},
+        {.reason = kStatusSyntaxError, .text = " "},
     };
 
     struct JsonParser parser;
-    testParserInit(&parser);
+    testParserInit(&parser, 0);
     for (JsonSize i = 0; i < COUNTOF(kInputs); ++i) {
         CHECK(kInputs[i].reason ==
               jsonParse(kInputs[i].text, (JsonSize)strlen(kInputs[i].text), &parser));
         CHECK(!parser.offset == kInputs[i].zeroOffset);
+    }
+}
+
+static void testcaseUserStop(void)
+{
+    testcaseInit("user_stop");
+    struct JsonParser parser;
+    testParserInit(&parser, 1);
+    static const char kAllTypes[] = "{\"key\":[\"str\",123,1.0,true,null]}";
+    for (sStopType = 0; sStopType < kStopTypeCount; ++sStopType) {
+        CHECK(kStatusStopped == jsonParse(kAllTypes, (JsonSize)strlen(kAllTypes), &parser));
     }
 }
 
@@ -980,17 +1077,16 @@ static void runInternalPassFailTests(void)
 
 int main(void)
 {
-    puts("* * * running RFC 8259 conformance tests * * *");
+    puts("* * * running mewjson tests * * *");
 
     sanityCheckRealEquality();
     runExternalPassFailTests();
     runInternalPassFailTests();
     testcaseReaderOom();
-    testcaseDigitsPastEndOfInput();
     testcaseExceedMaxDepth();
     testcaseLargeNumbers();
     testcaseParseErrors();
-
+    testcaseUserStop();
     checkForLeaks();
 
     puts("* * * passed all testcases * * *");
