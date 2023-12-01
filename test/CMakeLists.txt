@@ -1,17 +1,8 @@
 
-function(build_test NAME)
-    add_executable(${NAME} ${NAME}.c test.c test.h)
-    target_link_libraries(${NAME}
-            PRIVATE mewjson)
-    target_link_libraries(${NAME}
-            PRIVATE mewjson mewjson_warnings)
-    add_test(NAME ${NAME}
-            COMMAND ${NAME})
-endfunction()
-
-build_test(test_read_write)
-build_test(test_document)
-
-# Read/write tests need to know where to look to find the testcase files.
-target_compile_definitions(test_read_write
+add_executable(test_parser test.c)
+target_link_libraries(test_parser
+        PRIVATE mewjson mewjson_warnings)
+target_compile_definitions(test_parser
         PRIVATE TESTCASE_PREFIX="${CMAKE_CURRENT_SOURCE_DIR}/testcases/")
+add_test(NAME test_parser
+        COMMAND test_parser)
