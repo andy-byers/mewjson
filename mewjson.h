@@ -1,16 +1,5 @@
-// mewjson: a library for (de)serializing JSON text
+// mewjson: a tiny JSON parser
 // Distributed under the MIT License (http://opensource.org/licenses/MIT)
-//
-// This file contains the API documentation for mewjson. There are interfaces for reading and
-// writing JSON (jsonRead, jsonWrite), as well as accessing an in-memory representation of the
-// data (JsonDocument, JsonValue, etc.).
-//
-// General API rules:
-// 1. Pointers passed to API functions must be valid, unless otherwise noted
-// 2. Indices passed to API functions must be in bounds, unless otherwise noted
-// 3. Functions that expect a JsonValue of a specific type, like jsonArrayGet(), jsonObjectGet(),
-//    etc., will break if passed the wrong type (make sure to check the type first by calling
-//    jsonType() on the JsonValue in question)
 #ifndef MEWJSON_H
 #define MEWJSON_H
 
@@ -39,9 +28,6 @@ typedef ptrdiff_t JsonSize;
 // JSON value (object, array, string, integer, real number, boolean, or null)
 typedef struct JsonValue JsonValue;
 
-// Parsed JSON document
-typedef struct JsonDocument JsonDocument;
-
 // Describes the type of JSON value
 enum JsonType {
     kTypeString,
@@ -56,6 +42,7 @@ enum JsonType {
 // Status code produced by the parser
 enum JsonParseStatus {
     kParseOk,
+    kParseStopped,
     kParseNoMemory,
     kParseExceededMaxDepth,
     kParseStringInvalidEscape,
@@ -73,6 +60,17 @@ enum JsonParseStatus {
     kParseStatusCount
 };
 
+// User-defined callbacks to call as the document is parsed
+struct JsonHandler {
+    void *ctx;
+    JsonBool (*acceptKey)(void *, const char *, JsonSize);
+    JsonBool (*acceptValue)(void *, JsonValue *);
+    JsonBool (*beginObject)(void *);
+    JsonBool (*beginArray)(void *);
+    JsonBool (*endObject)(void *);
+    JsonBool (*endArray)(void *);
+};
+
 // General-purpose allocation routines used by the parser
 // User-provided allocators must return memory that is aligned to at least _Alignof(max_align_t).
 struct JsonAllocator {
@@ -83,53 +81,27 @@ struct JsonAllocator {
 
 // JSON parser context
 struct JsonParser {
+    struct JsonAllocator a;
+    struct JsonHandler h;
+
     // Byte offset that the parser stopped on in the input buffer.
     JsonSize offset;
-
-    // Status code pertaining to the last parse. Values is kParseOk on success, and some other
-    // variant on failure.
-    enum JsonParseStatus status;
-
-    // Private members.
-    struct {
-        struct JsonAllocator a;
-        JsonDocument *doc;
-        JsonSize upIndex;
-        JsonSize depth;
-    } x;
 };
 
 // Initialize a parser
-// This function must be called prior to jsonRead(). If the allocator parameter is NULL, then the
-// standard C general purpose allocation routines (malloc, realloc, and free) are used.
-void jsonParserInit(struct JsonParser *parser, struct JsonAllocator *a);
+// This function must be called prior to jsonRead(). If the handler or allocator parameters are
+// NULL, then default values are used. The default handler does nothing, and the default
+// allocator uses the standard C dynamic memory management functions (malloc, realloc, and free).
+// If either a handler or allocator is provided, then all function pointers contained within must
+// be valid.
+void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct JsonAllocator *a);
 
-// Free memory associated with a document
-void jsonDestroyDocument(JsonDocument *doc);
-
-// Build an in-memory representation of a JSON document
-// Returns a pointer to JsonDocument representing the parsed document on success, and NULL on
-// failure. The reason for failure can be queried by calling jsonGetError() on the parser. The
-// input buffer does not need to be null-terminated. jsonDestroyDocument() must be called on
-// the returned document when it is no longer needed.
+// Parse a JSON document
+// Input buffer does not need to be null-terminated.
 MEWJSON_NODISCARD
-JsonDocument *jsonRead(const char *input, JsonSize length, struct JsonParser *parser);
+enum JsonParseStatus jsonParse(const char *input, JsonSize length, struct JsonParser *parser);
 
-// Return the root value of a document
-// A successfully-parsed document will always have a single root value. The root can be of
-// any type.
-JsonValue *jsonRoot(JsonDocument *doc);
-
-// Write a JSON value and all its descendents to a buffer
-// Returns the number of bytes needed to hold the serialized JSON data. jsonWrite() will write as
-// much as possible if there is not enough space. Call jsonWrite(NULL, 0, root) to check how many
-// bytes are required to write a particular value. The written text is always a valid JSON document.
-JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root);
-
-// Return the length of a JSON value
-// When called on an object or array, this function returns the number of elements or members,
-// respectively. For strings, this function returns the number of bytes. For all other types,
-// this function returns 0.
+// Return the length of a JSON string
 JsonSize jsonLength(const JsonValue *val);
 
 // Return an enumerator describing the type of JSON value
@@ -154,60 +126,5 @@ double jsonReal(const JsonValue *val);
 
 // Return the value of a JSON boolean
 JsonBool jsonBoolean(const JsonValue *val);
-
-// Find the index of the object member with the given key
-// Returns -1 if the member does not exist.
-JsonSize jsonObjectFind(JsonValue *obj, const char *key, JsonSize length);
-
-// Return a child value from a JSON object or array
-// Returns NULL if the index is out of bounds.
-JsonValue *jsonContainerGet(JsonValue *container, JsonSize index);
-
-// Determines the behavior of a cursor during traversal
-// kCursorNormal visits the immediate children of a container node, and kCursorRecursive
-// visits all nodes rooted at the target node, including the target node itself.
-// The following examples show how each mode behaves. The numbers indicate the order in
-// which the various JSON values are encountered. Each example assumes that the cursor is
-// started on the root value: an array in the first case and an integer in the second.
-//  Document  | kCursorNormal | kCursorRecursive | Node
-// -----------|---------------|------------------|--------------
-//   [        |               | 1                | [...]
-//     "a",   | 1             | 2                | "a"
-//     [      | 2             | 3                | [...]
-//       true |               | 4                | true
-//     ]      |               |                  |
-//   ]        |               |                  |
-//
-//  Document  | kCursorNormal | kCursorRecursive | Node
-// -----------|---------------|------------------|--------------
-//   42       |               | 1                | 42
-enum JsonCursorMode {
-    kCursorNormal,
-    kCursorRecursive,
-};
-
-struct JsonCursor {
-    JsonValue *root;
-    JsonValue *parent;
-    JsonValue *value;
-    enum JsonCursorMode mode;
-};
-
-// Initialize a cursor for traversal over some portion of a JSON document
-void jsonCursorInit(JsonValue *root, enum JsonCursorMode mode, struct JsonCursor *c);
-
-// Return true if a cursor is valid, false otherwise
-// This function must return true before either jsonCursorNext() or jsonCursorKey() are called,
-// or any of the members of struct JsonCursor are accessed.
-JsonBool jsonCursorIsValid(const struct JsonCursor *c);
-
-// Move a cursor to the next JSON value
-void jsonCursorNext(struct JsonCursor *c);
-
-// Return a pointer to the first byte of the current object member's key, or NULL if the cursor
-// is not positioned on an object member
-// If the length parameter is not NULL, this function will write to it the length of the key in
-// bytes.
-const char *jsonCursorKey(struct JsonCursor *c, JsonSize *length);
 
 #endif // MEWJSON_H
