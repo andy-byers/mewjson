@@ -20,48 +20,7 @@
 #define STR(x) XSTR(x)
 #define CAT(x, y) XSTR(x##y)
 
-static JsonSize sBytesUsed = 0;
-static char sWriteBuf[16384];
-static char *sWritePtr;
-static int sStopType;
-enum { kStopAcceptKey = kTypeCount, kStopBeginContainer, kStopEndContainer, kStopTypeCount };
-
-void *leakCheckMalloc(size_t size)
-{
-    JsonSize *ptr = malloc(sizeof(JsonSize) + size);
-    if (ptr) {
-        sBytesUsed += (JsonSize)size;
-        *ptr++ = (JsonSize)size;
-    }
-    return ptr;
-}
-
-void *leakCheckRealloc(void *ptr, size_t size)
-{
-    JsonSize oldSize = 0;
-    JsonSize *hdr = ptr;
-    if (hdr) {
-        --hdr;
-        oldSize = hdr[0];
-    }
-    JsonSize *newPtr = realloc(hdr, sizeof(JsonSize) + size);
-    if (newPtr) {
-        sBytesUsed += (JsonSize)size - oldSize;
-        *newPtr++ = (JsonSize)size;
-    }
-    return newPtr;
-}
-
-void leakCheckFree(void *ptr)
-{
-    if (ptr) {
-        JsonSize *hdr = ptr;
-        --hdr;
-        sBytesUsed -= hdr[0];
-        CHECK(sBytesUsed >= 0);
-        free(hdr);
-    }
-}
+static JsonSize sBytesUsed;
 
 void checkForLeaks(void)
 {
@@ -90,7 +49,12 @@ static void *testMalloc(size_t size)
     } else if (sOomCounter > 0) {
         --sOomCounter;
     }
-    return leakCheckMalloc(size);
+    JsonSize *ptr = malloc(sizeof(JsonSize) + size);
+    if (ptr) {
+        sBytesUsed += (JsonSize)size;
+        *ptr++ = (JsonSize)size;
+    }
+    return ptr;
 }
 
 static void *testRealloc(void *ptr, size_t size)
@@ -100,12 +64,29 @@ static void *testRealloc(void *ptr, size_t size)
     } else if (sOomCounter > 0) {
         --sOomCounter;
     }
-    return leakCheckRealloc(ptr, size);
+    JsonSize oldSize = 0;
+    JsonSize *hdr = ptr;
+    if (hdr) {
+        --hdr;
+        oldSize = hdr[0];
+    }
+    JsonSize *newPtr = realloc(hdr, sizeof(JsonSize) + size);
+    if (newPtr) {
+        sBytesUsed += (JsonSize)size - oldSize;
+        *newPtr++ = (JsonSize)size;
+    }
+    return newPtr;
 }
 
 static void testFree(void *ptr)
 {
-    leakCheckFree(ptr);
+    if (ptr) {
+        JsonSize *hdr = ptr;
+        --hdr;
+        sBytesUsed -= hdr[0];
+        CHECK(sBytesUsed >= 0);
+        free(hdr);
+    }
 }
 
 static struct JsonAllocator sAllocator = {
@@ -114,157 +95,115 @@ static struct JsonAllocator sAllocator = {
     testFree,
 };
 
-// Modified from SQLite (src/json.c).
-static void appendEscapedString(const char *str, JsonSize len)
+struct TestcaseContext {
+    struct JsonHandler base;
+    void *backing;
+
+    // Save the most-recently-decoded string to this buffer
+    JsonSize sLen;
+    char *sBuf;
+
+    // Write all integers encountered during the parse to this buffer
+    int64_t *iBuf;
+    int64_t *iPtr;
+
+    // Write all real numbers encountered during the parse to this buffer
+    double *rBuf;
+    double *rPtr;
+
+    // Tags to indicate which handler function to return 0 from
+    enum {
+        kStopAcceptKey = kTypeCount,
+        kStopBeginContainer,
+        kStopEndContainer,
+        kStopTypeCount,
+    };
+
+    // Stop the parse when this type of JSON value is encountered
+    int stopType;
+};
+
+#define MAX_SCALARS 4096
+#define SEGMENT_SIZE (MAX_SCALARS * 8)
+
+void contextCleanup(struct TestcaseContext *ctx)
 {
-    *sWritePtr++ = '"';
-    for (JsonSize i = 0; i < len; i++) {
-        uint8_t c = ((uint8_t *)str)[i];
-        if (c == '"' || c == '\\') {
-json_simple_escape:
-            *sWritePtr++ = '\\';
-        } else if (c <= 0x1F) {
-            static const char kSpecialChars[] = {
-                0, 0, 0, 0, 0, 0, 0, 0, 'b', 't', 'n', 0, 'f', 'r', 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0,   0,   0,   0, 0,   0,   0, 0,
-            };
-            CHECK(COUNTOF(kSpecialChars) == 32);
-            CHECK(kSpecialChars['\b'] == 'b');
-            CHECK(kSpecialChars['\f'] == 'f');
-            CHECK(kSpecialChars['\n'] == 'n');
-            CHECK(kSpecialChars['\r'] == 'r');
-            CHECK(kSpecialChars['\t'] == 't');
-            if (kSpecialChars[c]) {
-                c = (uint8_t)kSpecialChars[c];
-                goto json_simple_escape;
-            }
-            *sWritePtr++ = '\\';
-            *sWritePtr++ = 'u';
-            *sWritePtr++ = '0';
-            *sWritePtr++ = '0';
-            *sWritePtr++ = (char)('0' + (c >> 4));
-            c = (uint8_t) "0123456789abcdef"[c & 0xF];
-        }
-        *sWritePtr++ = (char)c;
-    }
-    *sWritePtr++ = '"';
+    free(ctx->backing);
 }
 
-static void testWriteValue(const JsonValue *value)
+void contextSetString(struct TestcaseContext *ctx, const char *string, JsonSize length)
 {
-    switch (jsonType(value)) {
-        case kTypeString: {
-            JsonSize len;
-            const char *str = jsonString(value, &len);
-            appendEscapedString(str, len);
-            break;
-        }
-        case kTypeInteger:
-            sWritePtr += sprintf(sWritePtr, "%lld", jsonInteger(value));
-            break;
-        case kTypeBoolean:
-            if (jsonBoolean(value)) {
-                *sWritePtr++ = 't';
-                *sWritePtr++ = 'r';
-                *sWritePtr++ = 'u';
-                *sWritePtr++ = 'e';
-            } else {
-                *sWritePtr++ = 'f';
-                *sWritePtr++ = 'a';
-                *sWritePtr++ = 'l';
-                *sWritePtr++ = 's';
-                *sWritePtr++ = 'e';
-            }
-            break;
-        case kTypeReal:
-            if (isfinite(jsonReal(value))) {
-                const char *ptr = sWritePtr;
-                sWritePtr += sprintf(sWritePtr, "%g", jsonReal(value));
-                // Add ".0" to the end of the number if there are no other "floating-point"
-                // indicators present. Makes sure the number is recognized as a real next time.
-                JsonBool foundFp = 0;
-                for (; ptr != sWritePtr; ++ptr) {
-                    if (*ptr == '.' || *ptr == 'e' || *ptr == 'E') {
-                        foundFp = 1;
-                        break;
-                    }
-                }
-                if (!foundFp) {
-                    *sWritePtr++ = '.';
-                    *sWritePtr++ = '0';
-                }
-                break;
-            }
-            // Intentional fallthrough: convert +/-Inf into null.
-        default: // kTypeNull
-            *sWritePtr++ = 'n';
-            *sWritePtr++ = 'u';
-            *sWritePtr++ = 'l';
-            *sWritePtr++ = 'l';
-            break;
-    }
+    CHECK(length <= SEGMENT_SIZE);
+    memcpy(ctx->sBuf, string, (size_t)length);
+    ctx->sLen = length;
 }
 
-static void testMaybeAddComma(void)
+void contextPushInteger(struct TestcaseContext *ctx, int64_t integer)
 {
-    if (sWritePtr == sWriteBuf) {
-        return; // First token
-    }
-    if (sWritePtr[-1] != '{' && sWritePtr[-1] != '[' && sWritePtr[-1] != ':') {
-        *sWritePtr++ = ',';
-    }
+    CHECK(ctx->iPtr - ctx->iBuf < MAX_SCALARS);
+    *ctx->iPtr++ = integer;
+}
+
+void contextPushReal(struct TestcaseContext *ctx, double real)
+{
+    CHECK(ctx->rPtr - ctx->rBuf < MAX_SCALARS);
+    *ctx->rPtr++ = real;
 }
 
 static JsonBool testAcceptKey(void *ctx, const char *key, JsonSize length)
 {
-    testMaybeAddComma();
-    appendEscapedString(key, length);
-    *sWritePtr++ = ':';
-    (void)ctx;
-    return sStopType != kStopAcceptKey;
+    struct TestcaseContext *tc = ctx;
+    contextSetString(tc, key, length);
+    return tc->stopType != kStopAcceptKey;
 }
 
 static JsonBool testAcceptValue(void *ctx, const JsonValue *value)
 {
-    testMaybeAddComma();
-    testWriteValue(value);
-    (void)ctx;
-    return sStopType != (int)jsonType(value);
+    struct TestcaseContext *tc = ctx;
+    if (jsonType(value) == kTypeInteger) {
+        contextPushInteger(tc, jsonInteger(value));
+    } else if (jsonType(value) == kTypeReal) {
+        contextPushReal(tc, jsonReal(value));
+    } else if (jsonType(value) == kTypeString) {
+        contextSetString(tc, jsonString(value), jsonLength(value));
+    }
+    return tc->stopType != (int)jsonType(value);
 }
 
 static JsonBool testBeginContainer(void *ctx, JsonBool isObject)
 {
-    testMaybeAddComma();
-    if (isObject) {
-        *sWritePtr++ = '{';
-    } else {
-        *sWritePtr++ = '[';
-    }
-    (void)ctx;
-    return sStopType != kStopBeginContainer;
+    (void)isObject;
+    struct TestcaseContext *tc = ctx;
+    return tc->stopType != kStopBeginContainer;
 }
 
 static JsonBool testEndContainer(void *ctx, JsonBool isObject)
 {
-    CHECK(sWritePtr != sWriteBuf);
-    if (sWritePtr[-1] == ',') {
-        --sWritePtr; // Overwrite last value separator
-    }
-    if (isObject) {
-        *sWritePtr++ = '}';
-    } else {
-        *sWritePtr++ = ']';
-    }
-    (void)ctx;
-    return sStopType != kStopEndContainer;
+    (void)isObject;
+    struct TestcaseContext *tc = ctx;
+    return tc->stopType != kStopEndContainer;
 }
 
-static struct JsonHandler sHandler = {
-    .acceptKey = testAcceptKey,
-    .acceptValue = testAcceptValue,
-    .beginContainer = testBeginContainer,
-    .endContainer = testEndContainer,
-};
+void contextInit(struct TestcaseContext *ctx)
+{
+    ctx->backing = malloc(SEGMENT_SIZE * 3);
+    ctx->sBuf = ctx->backing;
+    ctx->iBuf = (int64_t *)(ctx->sBuf + SEGMENT_SIZE);
+    ctx->rBuf = (double *)(ctx->sBuf + SEGMENT_SIZE * 2);
+    CHECK(((uintptr_t)ctx->iBuf & 7) == 0);
+    CHECK(((uintptr_t)ctx->rBuf & 7) == 0);
+    ctx->iPtr = ctx->iBuf;
+    ctx->rPtr = ctx->rBuf;
+    ctx->stopType = -1;
+
+    ctx->base = (struct JsonHandler){
+        .ctx = ctx,
+        .acceptKey = testAcceptKey,
+        .acceptValue = testAcceptValue,
+        .beginContainer = testBeginContainer,
+        .endContainer = testEndContainer,
+    };
+}
 
 static const char *kNoTestNames[] = {
     "n_array_1_true_without_comma",
@@ -763,6 +702,7 @@ static struct Testcase {
     NO(string_missing_high_surrogate, "\"\\uDC00\"")
     NO(object_with_trailing_comment, "{\"a\":\"b\"}/*comment*/")
     NO(object_with_leading_comment, "/*comment*/{\"a\":\"b\"}")
+    NO(number_with_junk_at_end, "1234567*")
     NO(number_very_long_with_junk_at_end, "123456789012345678901234567890.0e*")
     NO(string_backslash_00, "[\"\\0\"]")
     NO(structure_lonely_array_end, "]")
@@ -770,6 +710,9 @@ static struct Testcase {
     NO(structure_embedded_EOF, "[\xFF]")
     NO(structure_EOF_at_end, "[]\xFF")
     NO(structure_EOF_at_end2, "[]\xFF\xFF")
+    NO(structure_mismatched_containers, "[}")
+    NO(structure_mismatched_containers2, "[[1,2,true,{\"a\":\"b\"}]}")
+    NO(structure_mismatched_containers3, "{]")
     NO(string_with_EOF, "\"\xFF\"")
 };
 // clang-format on
@@ -788,123 +731,53 @@ static void sanityCheckRealEquality(void)
     CHECK(!areRealsEqual(NAN, NAN));
 }
 
-static void testParserInit(struct JsonParser *parser, JsonBool useHandler)
+static void testParserInit(struct JsonParser *parser, struct TestcaseContext *ctx)
 {
-    jsonParserInit(parser, useHandler ? &sHandler : NULL, &sAllocator);
+    if (ctx) {
+        contextInit(ctx);
+    }
+    jsonParserInit(parser, ctx ? &ctx->base : NULL, &sAllocator);
 }
 
 static void testcaseInit(const char *name)
 {
     puts(name);
-    sWritePtr = sWriteBuf;
+    checkForLeaks();
     sOomCounter = -1;
-    sStopType = -1;
 }
 
-// Modified from https://json.org/example.html. Extra nested containers added in a
-// few places to cause more node allocations.
 static const char kOomExample[] =
-    "{\"web-app\": {\n"
-    "  \"servlet\": [   \n"
-    "    {\n"
-    "      \"servlet-name\": \"cofaxCDS\",\n"
-    "      \"servlet-class\": \"org.cofax.cds.CDSServlet\",\n"
-    "      \"init-param\": {\n"
-    "        \"configGlossary:installationAt\": \"Philadelphia, PA\",\n"
-    "        \"configGlossary:adminEmail\": \"ksm@pobox.com\",\n"
-    "        \"configGlossary:poweredBy\": \"Cofax\",\n"
-    "        \"configGlossary:poweredByIcon\": \"/images/cofax.gif\",\n"
-    "        \"configGlossary:staticPath\": \"/content/static\",\n"
-    "        \"templateProcessorClass\": \"org.cofax.WysiwygTemplate\",\n"
-    "        \"templateLoaderClass\": \"org.cofax.FilesTemplateLoader\",\n"
-    "        \"templatePath\": \"templates\",\n"
-    "        \"templateOverridePath\": \"\",\n"
-    "        \"defaultListTemplate\": \"listTemplate.htm\",\n"
-    "        \"defaultFileTemplate\": \"articleTemplate.htm\",\n"
-    "        \"useJSP\": false,\n"
-    "        \"jspListTemplate\": \"listTemplate.jsp\",\n"
-    "        \"jspFileTemplate\": \"articleTemplate.jsp\",\n"
-    "        \"cachePackageTagsTrack\": 200,\n"
-    "        \"cachePackageTagsStore\": 200,\n"
-    "        \"cachePackageTagsRefresh\": 60,\n"
-    "        \"cacheTemplatesTrack\": 100,\n"
-    "        \"cacheTemplatesStore\": 50,\n"
-    "        \"cacheTemplatesRefresh\": 15,\n"
-    "        \"cachePagesTrack\": 200,\n"
-    "        \"cachePagesStore\": 100,\n"
-    "        \"cachePagesRefresh\": 10,\n"
-    "        \"cachePagesDirtyRead\": 10,\n"
-    "        \"searchEngineListTemplate\": \"forSearchEnginesList.htm\",\n"
-    "        \"searchEngineFileTemplate\": \"forSearchEngines.htm\",\n"
-    "        \"searchEngineRobotsDb\": \"WEB-INF/robots.db\",\n"
-    "        \"useDataStore\": true,\n"
-    "        \"dataStoreClass\": \"org.cofax.SqlDataStore\",\n"
-    "        \"redirectionClass\": \"org.cofax.SqlRedirection\",\n"
-    "        \"dataStoreName\": \"cofax\",\n"
-    "        \"dataStoreDriver\": \"com.microsoft.jdbc.sqlserver.SQLServerDriver\",\n"
-    "        \"dataStoreUrl\": \"jdbc:microsoft:sqlserver://LOCALHOST:1433;DatabaseName=goon\",\n"
-    "        \"dataStoreUser\": \"sa\",\n"
-    "        \"dataStorePassword\": \"dataStoreTestQuery\",\n"
-    "        \"dataStoreTestQuery\": \"SET NOCOUNT ON;select test='test';\",\n"
-    "        \"dataStoreLogFile\": \"/usr/local/tomcat/logs/datastore.log\",\n"
-    "        \"dataStoreInitConns\": 10,\n"
-    "        \"dataStoreMaxConns\": 100,\n"
-    "        \"dataStoreConnUsageLimit\": 100,\n"
-    "        \"dataStoreLogLevel\": \"debug\",\n"
-    "        \"maxUrlLength\": 500}},\n"
-    "    {\n"
-    "      \"servlet-name\": \"cofaxEmail\",\n"
-    "      \"servlet-class\": \"org.cofax.cds.EmailServlet\",\n"
-    "      \"init-param\": {\n"
-    "      \"mailHost\": \"mail1\",\n"
-    "      \"mailHostOverride\": \"mail2\"}},\n"
-    "    {\n"
-    "      \"servlet-name\": \"cofaxAdmin\",\n"
-    "      \"servlet-class\": \"org.cofax.cds.AdminServlet\"},\n"
-    " \n"
-    "    {\n"
-    "      \"servlet-name\": \"fileServlet\",\n"
-    "      \"extraArray\": "
-    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],"
-    "      \"servlet-class\": \"org.cofax.cds.FileServlet\"},\n"
-    "    {\n"
-    "      \"servlet-name\": \"cofaxTools\",\n"
-    "      \"servlet-class\": \"org.cofax.cms.CofaxToolsServlet\",\n"
-    "      \"extraArray\": [0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1,2,3,4],"
-    "      \"init-param\": {\n"
-    "        \"templatePath\": \"toolstemplates/\",\n"
-    "        \"log\": 1,\n"
-    "        \"extraArray1\": [true,false,true,false,true,false,true,false,true,false,true,false],"
-    "        \"extraArray2\": [null,null,null,null,null,null,null,null,null,null,null,null,null],"
-    "        \"logLocation\": \"/usr/local/tomcat/logs/CofaxTools.log\",\n"
-    "        \"logMaxSize\": \"\",\n"
-    "        \"dataLog\": 1,\n"
-    "        \"dataLogLocation\": \"/usr/local/tomcat/logs/dataLog.log\",\n"
-    "        \"dataLogMaxSize\": \"\",\n"
-    "        \"removePageCache\": \"/content/admin/remove?cache=pages&id=\",\n"
-    "        \"removeTemplateCache\": \"/content/admin/remove?cache=templates&id=\",\n"
-    "        \"fileTransferFolder\": \"/usr/local/tomcat/webapps/content/fileTransferFolder\",\n"
-    "        \"lookInContext\": 1,\n"
-    "        \"adminGroupID\": 4,\n"
-    "        \"betaServer\": true}}],\n"
-    "  \"servlet-mapping\": {\n"
-    "    \"extraArray\": "
-    "[1,[2,[3,[4,[5,[6,[7,[8,[9,[0,[1,[2,[3,[4,[5,[6,[7,[8,[9,[0]]]]]]]]]]]]]]]]]]]],\n"
-    "    \"cofaxCDS\": \"/\",\n"
-    "    \"cofaxEmail\": \"/cofaxutil/aemail/*\",\n"
-    "    \"cofaxAdmin\": \"/admin/*\",\n"
-    "    \"fileServlet\": \"/static/*\",\n"
-    "    \"cofaxTools\": \"/tools/*\"},\n"
-    " \n"
-    "  \"taglib\": {\n"
-    "    \"taglib-uri\": \"cofax.tld\",\n"
-    "    \"taglib-location\": \"/WEB-INF/tlds/cofax.tld\"}}}";
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["
+    "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[4,2]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    "]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]";
 
 static void testcaseReaderOom(void)
 {
     testcaseInit("reader_oom");
     struct JsonParser parser;
-    testParserInit(&parser, 0);
+    testParserInit(&parser, NULL);
 
     int failures = 0;
     for (;; ++failures) {
@@ -924,22 +797,32 @@ static void testcaseRun(struct Testcase *tc)
     testcaseInit(tc->name);
 
     struct JsonParser parser;
-    testParserInit(&parser, tc->type != kTestcaseNo);
-    enum JsonStatus s = jsonParse(tc->input, tc->inputLen, &parser);
+    testParserInit(&parser, NULL);
+    // Determine how many bytes are needed to minify tc->input. Returns -1 if the parse fails.
+    const JsonSize outputLen = jsonMinify(tc->input, tc->inputLen, NULL, 0, &parser);
     if (tc->type == kTestcaseNo) {
         // Must fail for a reason other than running out of memory. OOM conditions are tested
         // separately (see TestcaseReaderOom()).
-        CHECK(s != kStatusNoMemory);
+        CHECK(parser.status != kStatusOk);
+        CHECK(parser.status != kStatusNoMemory);
+        CHECK(outputLen < 0);
     } else {
-        // Roundtrip the JSON data.
-        const JsonSize writeLength = sWritePtr - sWriteBuf;
-        char *result = malloc((size_t)writeLength);
-        memcpy(result, sWriteBuf, writeLength);
-        sWritePtr = sWriteBuf;
-        s = jsonParse(result, writeLength, &parser);
-        CHECK(kStatusOk == s);
-        CHECK(0 == memcmp(sWriteBuf, result, (size_t)writeLength));
-        free(result);
+        // A valid JSON document is never empty.
+        CHECK(outputLen > 0);
+        char *output = malloc((size_t)outputLen + 1);
+        // Roundtrip the JSON data. First minify to "output", then minify "output" to "output2".
+        CHECK(outputLen == jsonMinify(tc->input, tc->inputLen, output, outputLen, &parser));
+        CHECK(parser.status == kStatusOk);
+        output[outputLen] = '\0';
+        puts(output);
+        char *output2 = malloc((size_t)outputLen);
+        CHECK(outputLen == jsonMinify(output, outputLen, output2, outputLen, &parser));
+        CHECK(kStatusOk == parser.status);
+        CHECK(outputLen == parser.offset);
+        // Minified contents should match exactly.
+        CHECK(0 == memcmp(output, output2, (size_t)outputLen));
+        free(output2);
+        free(output);
     }
 }
 
@@ -949,24 +832,28 @@ static void testcaseLargeNumbers(void)
     static const char kText[] = "[-1e1111,1e1111]";
 
     struct JsonParser parser;
-    testParserInit(&parser, 0);
+    struct TestcaseContext ctx;
+    testParserInit(&parser, &ctx);
     CHECK(kStatusOk == jsonParse(kText, (JsonSize)strlen(kText), &parser));
+    CHECK(!isfinite(ctx.rBuf[0]));
+    CHECK(!isfinite(ctx.rBuf[1]));
+    CHECK(ctx.rBuf[0] < ctx.rBuf[1]);
 }
 
 static void testcaseExceedMaxDepth(void)
 {
     testcaseInit("exceed_max_depth");
     const JsonSize kDepth = 100000;
-    char *buffer = leakCheckMalloc(kDepth + 1);
+    char *buffer = malloc(kDepth + 1);
     for (size_t depth = 0; depth < kDepth; ++depth) {
         buffer[depth] = '[';
     }
     buffer[kDepth] = '\0';
 
     struct JsonParser parser;
-    testParserInit(&parser, 0);
+    testParserInit(&parser, NULL);
     CHECK(kStatusExceededMaxDepth == jsonParse(buffer, (JsonSize)strlen(buffer), &parser));
-    leakCheckFree(buffer);
+    free(buffer);
 }
 
 static void testcaseParseErrors(void)
@@ -991,7 +878,7 @@ static void testcaseParseErrors(void)
         {.reason = kStatusNumberMissingExponent, .text = "1.23e"},
         {.reason = kStatusNumberMissingFraction, .text = "1.e23"},
         {.reason = kStatusNumberInvalid, .text = "0123"},
-        {.reason = kStatusContainerNotClosed, .text = "[{}"},
+        {.reason = kStatusContainerNotClosed, .text = "[{\"key\":\"value\"}"},
         {.reason = kStatusContainerNotClosed, .text = "["},
         {.reason = kStatusSyntaxError, .text = "[]123"},
         {.reason = kStatusSyntaxError, .text = "", .zeroOffset = 1},
@@ -999,7 +886,7 @@ static void testcaseParseErrors(void)
     };
 
     struct JsonParser parser;
-    testParserInit(&parser, 0);
+    testParserInit(&parser, NULL);
     for (JsonSize i = 0; i < COUNTOF(kInputs); ++i) {
         CHECK(kInputs[i].reason ==
               jsonParse(kInputs[i].text, (JsonSize)strlen(kInputs[i].text), &parser));
@@ -1009,13 +896,15 @@ static void testcaseParseErrors(void)
 
 static void testcaseUserStop(void)
 {
+    struct TestcaseContext ctx;
     testcaseInit("user_stop");
     struct JsonParser parser;
-    testParserInit(&parser, 1);
+    testParserInit(&parser, &ctx);
     static const char kAllTypes[] = "{\"key\":[\"str\",123,1.0,true,null]}";
-    for (sStopType = 0; sStopType < kStopTypeCount; ++sStopType) {
+    for (ctx.stopType = 0; ctx.stopType < kStopTypeCount; ++ctx.stopType) {
         CHECK(kStatusStopped == jsonParse(kAllTypes, (JsonSize)strlen(kAllTypes), &parser));
     }
+    contextCleanup(&ctx);
 }
 
 static char *readFileToString(const char *pathname, JsonSize *lengthOut)
@@ -1027,7 +916,7 @@ static char *readFileToString(const char *pathname, JsonSize *lengthOut)
     const JsonSize fileSize = ftell(file);
     CHECK(0 == fseek(file, 0, SEEK_SET));
 
-    char *text = leakCheckMalloc((size_t)fileSize + 1);
+    char *text = malloc((size_t)fileSize + 1);
     const size_t readSize = fread(text, 1, (size_t)fileSize, file);
     CHECK(readSize == (size_t)fileSize);
     *lengthOut = fileSize;
@@ -1055,16 +944,16 @@ static void runOnePassFailTest(const char *name, enum TestcaseType type)
         .inputLen = inputLen,
     };
     testcaseRun(&tc);
-    leakCheckFree(text);
+    free(text);
 }
 
 static void runExternalPassFailTests(void)
 {
-    for (JsonSize i = 0; i < COUNTOF(kYesTestNames); ++i) {
-        runOnePassFailTest(kYesTestNames[i], kTestcaseYes);
-    }
     for (JsonSize i = 0; i < COUNTOF(kNoTestNames); ++i) {
         runOnePassFailTest(kNoTestNames[i], kTestcaseNo);
+    }
+    for (JsonSize i = 0; i < COUNTOF(kYesTestNames); ++i) {
+        runOnePassFailTest(kYesTestNames[i], kTestcaseYes);
     }
 }
 
@@ -1073,6 +962,61 @@ static void runInternalPassFailTests(void)
     for (size_t i = 0; i < COUNTOF(sInternalTestcases); ++i) {
         testcaseRun(&sInternalTestcases[i]);
     }
+}
+
+static void testCheckInteger(const char *input, int64_t integer)
+{
+    struct JsonParser parser;
+    struct TestcaseContext ctx;
+    testParserInit(&parser, &ctx);
+    CHECK(kStatusOk == jsonParse(input, (JsonSize)strlen(input), &parser));
+    CHECK(integer == ctx.iPtr[-1]);
+}
+
+static void testcaseIntegerIdentity(void)
+{
+    testcaseInit("number_integer");
+    testCheckInteger("-9223372036854775808", INT64_MIN);
+    testCheckInteger("-42389015228914", -42389015228914);
+    testCheckInteger("-24381906", -24381906);
+    testCheckInteger("-2394", -2394);
+    testCheckInteger("-1", -1);
+    testCheckInteger("0", 0);
+    testCheckInteger("1", 1);
+    testCheckInteger("3058", 3058);
+    testCheckInteger("39052783", 39052783);
+    testCheckInteger("9082348975302", 9082348975302);
+    testCheckInteger("9223372036854775807", INT64_MAX);
+}
+
+static void testCheckReal(const char *input, double real)
+{
+    struct JsonParser parser;
+    struct TestcaseContext ctx;
+    testParserInit(&parser, &ctx);
+    CHECK(kStatusOk == jsonParse(input, (JsonSize)strlen(input), &parser));
+    CHECK(areRealsEqual(real, ctx.rPtr[-1]));
+}
+
+static void testcaseRealIdentity(void)
+{
+    testcaseInit("number_real");
+    testCheckReal("1.0", 1.0);
+    testCheckReal("1.000000000000000005", 1.000000000000000005);
+    testCheckReal("1e-1000", 0.0);
+    testCheckReal("1e3", 1e3);
+    testCheckReal("1e+3", 1e+3);
+    testCheckReal("1e-3", 1e-3);
+    testCheckReal("1.2e3", 1.2e3);
+    testCheckReal("1.2e+3", 1.2e+3);
+    testCheckReal("1.2e-3", 1.2e-3);
+
+    // Overflowing integers are parsed as real numbers.
+    testCheckReal("99999999999999999999", 99999999999999999999.0);
+    testCheckReal("-9223372036854775809", (double)INT64_MIN - 1.0);
+    testCheckReal("9223372036854775808", (double)INT64_MAX + 1.0);
+    testCheckReal("-9223372036854775809.5", (double)INT64_MIN - 1.5);
+    testCheckReal("9223372036854775808.5", (double)INT64_MAX + 1.5);
 }
 
 int main(void)
@@ -1087,6 +1031,8 @@ int main(void)
     testcaseLargeNumbers();
     testcaseParseErrors();
     testcaseUserStop();
+    testcaseIntegerIdentity();
+    testcaseRealIdentity();
     checkForLeaks();
 
     puts("* * * passed all testcases * * *");

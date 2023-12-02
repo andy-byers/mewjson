@@ -1,15 +1,15 @@
 // mewjson: a tiny JSON parser
 // Distributed under the MIT License (http://opensource.org/licenses/MIT)
+
 #ifndef MEWJSON_H
 #define MEWJSON_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-// Maximum number of nested containers allowed in a JSON document
-#ifndef MEWJSON_MAX_DEPTH
-#define MEWJSON_MAX_DEPTH 10000
-#endif // MEWJSON_MAX_DEPTH
+#ifndef __has_attribute
+#define __has_attribute(x) 0
+#endif
 
 #ifndef MEWJSON_NODISCARD
 #if defined(_MSC_VER)
@@ -29,7 +29,14 @@ typedef ptrdiff_t JsonSize;
 typedef struct JsonValue JsonValue;
 
 // Describes the type of JSON value
-enum JsonType { kTypeString, kTypeInteger, kTypeReal, kTypeBoolean, kTypeNull, kTypeCount };
+enum JsonType {
+    kTypeString,
+    kTypeInteger,
+    kTypeReal,
+    kTypeBoolean,
+    kTypeNull,
+    kTypeCount //
+};
 
 // Status code produced by the parser
 enum JsonStatus {
@@ -61,13 +68,17 @@ struct JsonHandler {
     JsonBool (*endContainer)(void *ctx, JsonBool isObject);
 };
 
+// Return the length of a JSON string
+// Returns 0 if the given value is not a string.
+JsonSize jsonLength(const JsonValue *value);
+
 // Return an enumerator describing the type of JSON value
 enum JsonType jsonType(const JsonValue *value);
 
 // Return the value of an unescaped JSON string
-// The returned string is not null-terminated, but may contain embedded null bytes. Pass a pointer
-// to JsonSize to get the length of the string in bytes.
-const char *jsonString(const JsonValue *value, JsonSize *length);
+// The returned string is not null-terminated, but may contain embedded null bytes. Call
+// jsonLength(value) to get the length of the string in bytes.
+const char *jsonString(const JsonValue *value);
 
 // Return the value of a JSON integer
 // An integer is a JSON number that doesn't contain any "floating-point indicators" (e, E, or .).
@@ -99,6 +110,8 @@ struct JsonParser {
 
     // Byte offset that the parser stopped on in the input buffer.
     JsonSize offset;
+
+    enum JsonStatus status;
 };
 
 // Initialize a parser
@@ -113,5 +126,16 @@ void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct Jso
 // Input buffer does not need to be null-terminated.
 MEWJSON_NODISCARD
 enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser *parser);
+
+// Minify a JSON document
+// If a handler was set on the parser, it will be ignored for the duration of this function.
+// Returns the number of bytes needed to hold the minified text. If there was not enough space
+// in the output buffer, then the partially-written contents may be malformed (in addition to
+// being truncated). This function does not add a null terminator. On failure, returns -1 and
+// sets parser->status and parser->offset to indicate what went wrong and where the parser
+// stopped, respectively.
+MEWJSON_NODISCARD
+JsonSize jsonMinify(const char *input, JsonSize inputLen, char *output, JsonSize outputLen,
+                    struct JsonParser *parser);
 
 #endif // MEWJSON_H

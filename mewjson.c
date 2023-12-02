@@ -1,5 +1,6 @@
 // mewjson: a tiny JSON parser
 // Distributed under the MIT License (http://opensource.org/licenses/MIT)
+
 #include "mewjson.h"
 #include <assert.h>
 #include <float.h>
@@ -8,13 +9,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Maximum number of nested containers allowed in a JSON document
+#ifndef MEWJSON_MAX_DEPTH
+#define MEWJSON_MAX_DEPTH 10000
+#endif // MEWJSON_MAX_DEPTH
+
+// Number of bytes of stack space to use for tracking nested containers before
+// resorting to a heap allocation
+#ifndef MEWJSON_STACK_SIZE
+#define MEWJSON_STACK_SIZE 512
+#endif // MEWJSON_STACK_SIZE
+
+#define END_OF_INPUT '\xFF'
+#define TRUE (JsonBool)1
+#define FALSE (JsonBool)0
+
 #define UNUSED(x) (void)(x)
 #define SIZEOF(x) (JsonSize)sizeof(x)
-#define ALIGNOF(x) (JsonSize) _Alignof(x)
 #define COUNTOF(a) (SIZEOF(a) / SIZEOF(*(a)))
-#define LENGTHOF(a) (COUNTOF(a) - 1)
-#define MIN(x, y) ((x) < (y) ? (x) : (y))
-#define MAX(x, y) ((x) > (y) ? (x) : (y))
+
 #define JSON_MALLOC(a, size) (a).malloc((size_t)(size))
 #define JSON_REALLOC(a, ptr, size) (a).realloc(ptr, (size_t)(size))
 #define JSON_FREE(a, ptr) (a).free(ptr)
@@ -24,28 +37,21 @@ JsonBool defaultAcceptKey(void *ctx, const char *key, JsonSize value)
     UNUSED(ctx);
     UNUSED(key);
     UNUSED(value);
-    return 1;
+    return TRUE;
 }
 
 JsonBool defaultAcceptValue(void *ctx, const JsonValue *value)
 {
     UNUSED(ctx);
     UNUSED(value);
-    return 1;
+    return TRUE;
 }
 
-JsonBool defaultBeginContainer(void *ctx, JsonBool isObject)
+JsonBool defaultBeginOrEndContainer(void *ctx, JsonBool isObject)
 {
     UNUSED(ctx);
     UNUSED(isObject);
-    return 1;
-}
-
-JsonBool defaultEndContainer(void *ctx, JsonBool isObject)
-{
-    UNUSED(ctx);
-    UNUSED(isObject);
-    return 1;
+    return TRUE;
 }
 
 void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct JsonAllocator *a)
@@ -53,8 +59,8 @@ void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct Jso
     static const struct JsonHandler kHandlerPrototype = {
         .acceptKey = defaultAcceptKey,
         .acceptValue = defaultAcceptValue,
-        .beginContainer = defaultBeginContainer,
-        .endContainer = defaultEndContainer,
+        .beginContainer = defaultBeginOrEndContainer,
+        .endContainer = defaultBeginOrEndContainer,
     };
     static const struct JsonAllocator kAllocatorPrototype = {
         .malloc = malloc,
@@ -98,6 +104,9 @@ struct ParseState {
     uint8_t *stack;
     JsonSize depth;
     JsonSize capacity;
+
+    // Array used as backing for the stack until it gets too large.
+    uint8_t small[MEWJSON_STACK_SIZE];
 };
 
 // Constants related to the character class lookup table
@@ -472,6 +481,7 @@ static enum Token scanNumber(struct ParseState *s, const char **ptr, JsonBool is
 
     int64_t value = 0;
     while (ISNUMERIC(peekChar(ptr))) {
+        // Logic in this part was modified from SQLite's JSON module.
         const uint32_t v = NUMVAL(getChar(ptr));
         if (value > INT64_MAX / 10) {
             // This number is definitely too large to be represented as an int64_t (the
@@ -480,12 +490,14 @@ static enum Token scanNumber(struct ParseState *s, const char **ptr, JsonBool is
             goto call_scan_real;
         } else if (value == INT64_MAX / 10) {
             // This number might be too large (the "+ v" below might cause an overflow).
-            // Handle the special cases (modified from SQLite). Note that INT64_MAX is equal
-            // to 9223372036854775807. In this branch, v is referring to the least-significant
-            // digit of INT64_MAX, since the value * 10 below will yield 9223372036854775800.
+            // Handle the special cases. Note that INT64_MAX is equal to 9223372036854775807.
+            // In this branch, v is referring to the least-significant digit of INT64_MAX,
+            // since the value * 10 below will yield 9223372036854775800.
             if (v == 9) {
                 goto call_scan_real;
             } else if (v == 8) {
+                // If the number isn't exactly INT64_MIN, then it will overflow and must be
+                // parsed as a real.
                 if (isNegative && !ISNUMERIC(peekChar(ptr))) {
                     s->value = (JsonValue){.type = kTypeInteger, .v = {.integer = INT64_MIN}};
                     return kTokenValue;
@@ -550,7 +562,7 @@ static enum Token scanToken(struct ParseState *s, const char **ptr)
             return kTokenEndObject;
         case ']':
             return kTokenEndArray;
-        case EOF:
+        case END_OF_INPUT:
             return kTokenEndOfInput;
         default:
             s->status = kStatusSyntaxError;
@@ -627,25 +639,43 @@ static enum State predictState(enum State src, enum Token token)
 }
 
 MEWJSON_NODISCARD
-static int parserBeginContainer(struct ParseState *s, JsonBool isObject)
+static int maybeGrowStack(struct ParseState *s)
 {
     struct JsonAllocator *a = &s->a;
-    if (s->depth >= MEWJSON_MAX_DEPTH) {
-        s->status = kStatusExceededMaxDepth;
-        return -1;
-    }
     if (s->depth >= s->capacity) {
+        if (s->capacity == 0) {
+            s->capacity = MEWJSON_STACK_SIZE;
+            s->stack = s->small;
+            return 0;
+        }
         JsonSize cap = 4;
         while (cap <= s->depth) {
             cap *= 2;
         }
-        uint8_t *stack = JSON_REALLOC(*a, s->stack, cap * SIZEOF(s->stack[0]));
+        uint8_t *stack = JSON_MALLOC(*a, cap);
         if (!stack) {
             s->status = kStatusNoMemory;
             return -1;
         }
+        memcpy(stack, s->stack, (size_t)s->depth);
+        if (s->stack != s->small) {
+            JSON_FREE(*a, s->stack);
+        }
         s->stack = stack;
         s->capacity = cap;
+    }
+    return 0;
+}
+
+MEWJSON_NODISCARD
+static int parserBeginContainer(struct ParseState *s, JsonBool isObject)
+{
+    if (s->depth >= MEWJSON_MAX_DEPTH) {
+        s->status = kStatusExceededMaxDepth;
+        return -1;
+    }
+    if (maybeGrowStack(s)) {
+        return -1;
     }
     s->stack[s->depth] = isObject;
     ++s->depth;
@@ -677,12 +707,12 @@ static enum State parserEndContainer(struct ParseState *s)
     return kStateEnd;
 }
 
-static enum State parserAcceptKey(struct ParseState *s, enum State dst)
+static enum State parserAcceptKey(struct ParseState *s)
 {
     struct JsonHandler *h = &s->h;
     JsonValue *v = &s->value;
     const JsonBool rc = h->acceptKey(h->ctx, v->v.string, v->size);
-    return rc ? dst : kStateStop;
+    return rc ? kO1 : kStateStop;
 }
 
 static enum State parserAcceptValue(struct ParseState *s, enum State dst)
@@ -704,19 +734,19 @@ static enum State parserAcceptValue(struct ParseState *s, enum State dst)
 // Transition into the next state
 static enum State transitState(struct ParseState *s, enum State dst)
 {
-    // `dst` is the next state as predicted by predict(), upon reading token `token`.
+    // `dst` is the next state as predicted by predictState(), upon reading token `token`.
     // We need to make sure that the destination state is not a transient state (either
-    // kOE or kAE). As described in predict(), kOE (object end) and kAE (array end) are
-    // "pop" states, meaning we pop an element off the stack and leave a nested structure.
+    // kOE or kAE). As described in predictState(), kOE (object end) and kAE (array end) are
+    // "pop" states, meaning we pop an element off the stack and leave a nested container.
     // After doing so, we examine the new stack top. Using that value, we transition to
     // either kO2 (object member value) or kA1 (array element). Normally, these states
     // are entered when we have just read an object member value or array element,
-    // respectively, so basically, we are just treating the object or array as a child
+    // respectively, so basically, we are just treating the while object or array as a child
     // member/element in its parent object/array.
     switch (dst) {
         case kO1:
             // Indicate that the current node is an object member key.
-            return parserAcceptKey(s, dst);
+            return parserAcceptKey(s);
         case kOE:
         case kAE:
             // Leaving a nested container. Correct the state based on the type of container that
@@ -750,7 +780,9 @@ static enum Token parserAdvance(struct ParseState *s, const char **ptr)
 
 static int parserFinish(struct ParseState *s, enum State state, const char **ptr)
 {
-    skipWhitespace(ptr);
+    if (ISSPACE(peekChar(ptr))) {
+        skipWhitespace(ptr);
+    }
     if (state == kStateStop) {
         s->status = kStatusStopped;
         return 0;
@@ -788,14 +820,11 @@ static int parserParse(struct ParseState *s, const char **ptr)
 
 static void parserFinalize(struct ParseState *s, JsonSize offset, JsonSize length)
 {
-    s->offset = MIN(offset, length);
+    s->offset = offset < length ? offset : length;
     if (s->status != kStatusOk) {
         return;
     }
-    // The char * used to iterate over the input buffer should be 1 or more bytes past
-    // the first padding byte (skipWhitespace() is called in parserFinish() to skip past
-    // trailing whitespace). Otherwise, there is junk at the end of the input.
-    if (offset <= length) {
+    if (offset < length) {
         s->status = kStatusSyntaxError;
     }
 }
@@ -827,7 +856,7 @@ enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser 
         return kStatusNoMemory;
     }
     memcpy(text, input, (size_t)length);
-    memset(text + length, EOF, PADDING_LENGTH);
+    memset(text + length, END_OF_INPUT, PADDING_LENGTH);
 
     // Parse the document.
     const char *ptr = text;
@@ -836,39 +865,265 @@ enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser 
 
     // Save the offset that the parser left off on and cleanup.
     parser->offset = s.offset;
-    JSON_FREE(a, s.stack);
+    parser->status = s.status;
+    if (s.stack != s.small) {
+        JSON_FREE(a, s.stack);
+    }
     JSON_FREE(a, text);
     return s.status;
 }
 
-enum JsonType jsonType(const JsonValue *val)
+enum JsonType jsonType(const JsonValue *value)
 {
-    return val->type;
+    return value->type;
 }
 
-const char *jsonString(const JsonValue *val, JsonSize *length)
+JsonSize jsonLength(const JsonValue *value)
 {
-    assert(jsonType(val) == kTypeString);
-    if (length) {
-        *length = val->size;
+    return value->size;
+}
+
+const char *jsonString(const JsonValue *value)
+{
+    assert(jsonType(value) == kTypeString);
+    return value->v.string;
+}
+
+int64_t jsonInteger(const JsonValue *value)
+{
+    assert(jsonType(value) == kTypeInteger);
+    return value->v.integer;
+}
+
+double jsonReal(const JsonValue *value)
+{
+    assert(jsonType(value) == kTypeReal);
+    return value->v.real;
+}
+
+JsonBool jsonBoolean(const JsonValue *value)
+{
+    assert(jsonType(value) == kTypeBoolean);
+    return value->v.boolean;
+}
+
+struct Writer {
+    char *ptr;
+    JsonSize len;
+    JsonSize acc;
+    JsonBool sep;
+};
+
+static void appendChar(struct Writer *w, char c)
+{
+    ++w->acc;
+    if (w->len > 0) {
+        w->ptr[0] = c;
+        ++w->ptr;
+        --w->len;
     }
-    return val->v.string;
 }
 
-int64_t jsonInteger(const JsonValue *val)
+// This function seems to generate nicer assembly than calling appendChar() 4 times.
+static void appendChar4(struct Writer *w, const char *c4)
 {
-    assert(jsonType(val) == kTypeInteger);
-    return val->v.integer;
+    w->acc += 4;
+    if (w->len >= 4) {
+        *w->ptr++ = *c4++;
+        *w->ptr++ = *c4++;
+        *w->ptr++ = *c4++;
+        *w->ptr++ = *c4++;
+        w->len -= 4;
+    }
 }
 
-double jsonReal(const JsonValue *val)
+static void appendString(struct Writer *w, const char *str, JsonSize len)
 {
-    assert(jsonType(val) == kTypeReal);
-    return val->v.real;
+    w->acc += len;
+    if (len > 0 && len <= w->len) {
+        memcpy(w->ptr, str, (size_t)len);
+        w->ptr += len;
+        w->len -= len;
+    }
 }
 
-JsonBool jsonBoolean(const JsonValue *val)
+static void appendFiniteReal(struct Writer *w, double v)
 {
-    assert(jsonType(val) == kTypeBoolean);
-    return val->v.boolean;
+    assert(isfinite(v));
+
+    char buf[32];
+    static const int kMaxDigits = DBL_DECIMAL_DIG;
+    JsonSize len = snprintf(buf, COUNTOF(buf), "%.*g", kMaxDigits, v);
+    // Make sure the printed number contains some indication that it is a real number rather than
+    // an integer. This step is very important: otherwise, we get strange problems, like "-0.0"
+    // being written as "-0", which is stored as the integer 0. Tests that attempt to roundtrip
+    // "-0.0", or any other real that rounds to it, will fail. Also converts ',' to '.'  (some
+    // locales use ',' as their decimal point, but RFC 8259 specifies '.').
+    JsonBool foundFpChar = 0;
+    for (JsonSize i = 0; i < len; i++) {
+        if (buf[i] == ',') {
+            // TODO: Add a test that covers this (may need to consult the current locale)
+            buf[i] = '.';
+        }
+        if (ISFPCHAR(buf[i])) {
+            foundFpChar = 1;
+        }
+    }
+    if (!foundFpChar) {
+        buf[len++] = '.';
+        buf[len++] = '0';
+    }
+    appendString(w, buf, len);
+}
+
+// NOTE: This function is a bit faster than using snprintf(), and has the added benefit of not
+//       requiring inclusion of inttypes.h to get the proper format specifier ("%" PRId64).
+static void appendInteger(struct Writer *w, int64_t integer)
+{
+    // This buffer should have a single extra byte in the worst case.
+    char buffer[32];
+    const JsonBool negative = integer < 0;
+    char *end = buffer + COUNTOF(buffer);
+    char *ptr = end - 1;
+    // Don't call llabs(INT64_MIN). The result is undefined on 2s complement systems.
+    uint64_t u = integer == INT64_MIN ? (1ULL << 63) : (uint64_t)llabs(integer);
+    do {
+        *ptr-- = (char)(u % 10 + '0');
+        u /= 10;
+    } while (u);
+    if (negative) {
+        *ptr = '-';
+    } else {
+        ++ptr;
+    }
+    appendString(w, ptr, (JsonSize)(end - ptr));
+}
+
+// Modified from SQLite (src/json.c).
+static void appendEscapedString(struct Writer *w, const char *str, JsonSize len)
+{
+    appendChar(w, '"');
+    for (JsonSize i = 0; i < len; i++) {
+        uint8_t c = ((uint8_t *)str)[i];
+        if (c == '"' || c == '\\') {
+json_simple_escape:
+            appendChar(w, '\\');
+        } else if (c <= 0x1F) {
+            static const char kSpecialChars[] = {
+                0, 0, 0, 0, 0, 0, 0, 0, 'b', 't', 'n', 0, 'f', 'r', 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0,   0,   0,   0, 0,   0,   0, 0,
+            };
+            assert(COUNTOF(kSpecialChars) == 32);
+            assert(kSpecialChars['\b'] == 'b');
+            assert(kSpecialChars['\f'] == 'f');
+            assert(kSpecialChars['\n'] == 'n');
+            assert(kSpecialChars['\r'] == 'r');
+            assert(kSpecialChars['\t'] == 't');
+            if (kSpecialChars[c]) {
+                c = (uint8_t)kSpecialChars[c];
+                goto json_simple_escape;
+            }
+            appendChar4(w, "\\u00");
+            appendChar(w, (char)('0' + (c >> 4)));
+            c = (uint8_t) "0123456789abcdef"[c & 0xF];
+        }
+        appendChar(w, (char)c);
+    }
+    appendChar(w, '"');
+}
+
+static void testWriteValue(struct Writer *w, const JsonValue *value)
+{
+    switch (jsonType(value)) {
+        case kTypeString:
+            appendEscapedString(w, jsonString(value), jsonLength(value));
+            break;
+        case kTypeInteger:
+            appendInteger(w, jsonInteger(value));
+            break;
+        case kTypeBoolean:
+            if (jsonBoolean(value)) {
+                appendChar4(w, "true");
+            } else {
+                appendChar4(w, "fals");
+                appendChar(w, 'e');
+            }
+            break;
+        case kTypeReal:
+            if (isfinite(jsonReal(value))) {
+                appendFiniteReal(w, jsonReal(value));
+                break;
+            }
+            // Intentional fallthrough: convert +/-Inf into null.
+        default: // kTypeNull
+            appendChar4(w, "null");
+            break;
+    }
+}
+
+static void minifyMaybeAddComma(struct Writer *w, JsonBool sepAfter)
+{
+    if (w->sep) {
+        appendChar(w, ',');
+    }
+    w->sep = sepAfter;
+}
+
+static JsonBool minifyAcceptKey(void *ctx, const char *key, JsonSize length)
+{
+    struct Writer *w = ctx;
+    minifyMaybeAddComma(w, FALSE);
+    appendEscapedString(w, key, length);
+    appendChar(w, ':');
+    return TRUE;
+}
+
+static JsonBool minifyAcceptValue(void *ctx, const JsonValue *value)
+{
+    struct Writer *w = ctx;
+    minifyMaybeAddComma(w, TRUE);
+    testWriteValue(w, value);
+    return TRUE;
+}
+
+static JsonBool minifyBeginContainer(void *ctx, JsonBool isObject)
+{
+    struct Writer *w = ctx;
+    minifyMaybeAddComma(w, FALSE);
+    if (isObject) {
+        appendChar(w, '{');
+    } else {
+        appendChar(w, '[');
+    }
+    return TRUE;
+}
+
+static JsonBool minifyEndContainer(void *ctx, JsonBool isObject)
+{
+    struct Writer *w = ctx;
+    if (isObject) {
+        appendChar(w, '}');
+    } else {
+        appendChar(w, ']');
+    }
+    w->sep = TRUE;
+    return TRUE;
+}
+
+MEWJSON_NODISCARD
+JsonSize jsonMinify(const char *input, JsonSize inputLen, char *output, JsonSize outputLen,
+                    struct JsonParser *parser)
+{
+    struct Writer w = {.ptr = output, .len = outputLen};
+    struct JsonHandler userH = parser->h; // Save the user handler
+    parser->h = (struct JsonHandler){
+        .ctx = &w,
+        .acceptKey = minifyAcceptKey,
+        .acceptValue = minifyAcceptValue,
+        .beginContainer = minifyBeginContainer,
+        .endContainer = minifyEndContainer,
+    };
+    const enum JsonStatus s = jsonParse(input, inputLen, parser);
+    parser->h = userH; // Restore the user handler
+    return s == kStatusOk ? w.acc : -1;
 }

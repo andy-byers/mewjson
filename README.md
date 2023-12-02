@@ -11,7 +11,7 @@ The library requires the following to compile:
 
 ## Caveats
 + Only supports SAX-style (callback-based) parsing
-+ Parser uses dynamic memory
++ Parser uses dynamic memory, usually about equal to the size of the input
 + Real number parsing is very slow (uses `strtod()`)
 
 ## API
