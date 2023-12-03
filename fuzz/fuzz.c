@@ -15,38 +15,16 @@
         }                                                                                          \
     } while (0)
 
-static void *xMalloc(JsonSize size)
-{
-    CHECK(size > 0);
-    void *ptr = malloc((size_t)size);
-    CHECK(ptr);
-    return ptr;
-}
-
-static void xFree(void *ptr)
-{
-    free(ptr);
-}
-
 extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     struct JsonParser parser;
     jsonParserInit(&parser, NULL, NULL);
-    // Parse the document and determine how much space is needed to minify it.
-    const JsonSize n = jsonMinify((const char *)data, (JsonSize)size, NULL, 0, &parser);
-    CHECK(n != 0); // Valid JSON document is nonempty
-    if (n > 0) {
-        // The parse succeeded. Roundtrip the data and make sure the 2 copies match.
-        char *minified = xMalloc(n);
-        CHECK(n == jsonMinify((const char *)data, (JsonSize)size, minified, n, &parser));
-        char *minified2 = xMalloc(n);
-        CHECK(n == jsonMinify(minified, n, minified2, n, &parser));
-        CHECK(0 == memcmp(minified, minified2, (size_t)n));
-        xFree(minified2);
-        xFree(minified);
+    const enum JsonStatus s = jsonParse((const char *)data, (JsonSize)size, &parser);
+    if (s == kStatusOk) {
+        CHECK(parser.offset > 0); // Valid JSON document is nonempty
     } else {
-        // The parse failed. Must be due to some type of corruption.
-        CHECK(parser.status > kStatusNoMemory);
+        // The parse failed. Must be due to corruption.
+        CHECK(s > kStatusNoMemory);
     }
     return 0;
 }

@@ -111,31 +111,38 @@ struct ParseState {
 
 // Constants related to the character class lookup table
 enum {
-    kShiftValue = 4,    // xxxx >>>>
-    kMaskIsSpace = 1,   // 0000 0001
-    kMaskIsFp = 2,      // 0000 0010
-    kMaskIsNumeric = 4, // 0000 0100
-    kMaskIsHex = 12,    // 0000 1100
+    //                     0bxx xx xx xx
+    kMaskIsSpace = 1,     // 00 00 00 01
+    kMaskIsFp = 2,        // 00 00 00 10
+    kMaskIsNumeric = 4,   // 00 00 01 00
+    kMaskIsHex = 8,       // 00 00 10 00
+    kMaskIsNonAscii = 16, // 00 01 00 00
+    kMaskIsAsciiEnd = 32, // 00 10 00 00
 };
 
+// clang-format off
 // Character class lookup table: 4 least-significant bits of each byte store flags indicating what
 // class the character belongs to: one of "space", "floating-point indicator", "numeric digit", or
 // "hex digit". 'e' and 'E' belong to both the "floating-point indicator" and "hex digit" classes.
 // The masks and shift values above are used to test for inclusion in one of the classes, and to
 // extract the value bits for numeric and hex digits.
 static const uint8_t kCharClassTable[256] = {
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  1,   1,   0,   0,   1,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   1,   0,   0,   0,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   2,   0,   4,   20, 36, 52, 68, 84,  100, 116, 132, 148, 0,   0, 0, 0, 0, 0, 0, 168,
-    184, 200, 216, 234, 248, 0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  168, 184, 200, 216, 234, 248, 0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0, 0, 0, 0, 0, 0, 0,
-    0,   0,   0,   0,   0,   0,  0,  0,  0,  0,   0,   0,   0,   0,
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 33, 33, 32, 32, 33, 32, 32,
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+     1,  0, 32,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  2,  0,
+    12, 12, 12, 12, 12, 12, 12, 12, 12, 12,  0,  0,  0,  0,  0,  0,
+     0,  8,  8,  8,  8, 10,  8,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 32,  0,  0,  0,
+     0,  8,  8,  8,  8, 10,  8,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
 };
 
 // Check for inclusion in one of the character classes
@@ -143,10 +150,33 @@ static const uint8_t kCharClassTable[256] = {
 #define ISFPCHAR(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsFp)
 #define ISNUMERIC(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsNumeric)
 #define ISHEX(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsHex)
+#define ISASCIIEND(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsAsciiEnd)
+#define ISNONASCII(c) (kCharClassTable[(uint8_t)(c)] & kMaskIsNonAscii)
+
+static const uint8_t kNumericTable[256] = {
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  0,  0,  0,  0,  0,  0,
+    0, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+};
 
 // Get the integer representation of a numeric or hex digit
-#define NUMVAL(c) (kCharClassTable[(uint8_t)(c)] >> kShiftValue)
-#define HEXVAL(c) (kCharClassTable[(uint8_t)(c)] >> kShiftValue)
+#define NUMVAL(c) (kNumericTable[(uint8_t)(c)])
+#define HEXVAL(c) (kNumericTable[(uint8_t)(c)])
+
+// clang-format on
 
 enum Token {
     kTokenString,
@@ -172,8 +202,6 @@ static char getChar(const char **ptr)
     ++*ptr;
     return (*ptr)[-1];
 }
-
-#define GET_BYTE(parser) ((uint8_t)getChar(ptr))
 
 // Move the parser cursor back by 1 byte
 // Note that this function does not alter the parser's "c" field (the current character).
@@ -246,59 +274,51 @@ static enum Token scanFalse(struct ParseState *s, const char **ptr)
     return kTokenError;
 }
 
+// Tables are from https://arxiv.org/pdf/2010.03090.pdf
 MEWJSON_NODISCARD
-static JsonSize scanUtf8(const char **ptr, char **out, char byte)
+static JsonSize scanUtf8(const char **ptr, char **out)
 {
-    // Table and shifting trick from @skeeto/branchless-utf8. Only using half of the original
-    // table, since 1-byte codepoints have already been handled.
-    static const uint8_t kLengths[] = {0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 3, 3, 4, 0};
-    uint8_t c[4] = {(uint8_t)byte};
-    assert(c[0] >= 0x80); // ASCII chars already excluded
+    // clang-format off
+    static uint8_t kLookup1[] = {
+         8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,
+         8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,
+         0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+         9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+        11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+        11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+         8,  8,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+         1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+         4,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  5,  2,  2,
+         6,  3,  3,  3,  7,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,
+    };
+    static uint8_t kLookup2[] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 1, 1, 1,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 2, 2, 2,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 1,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 1, 1, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 2, 2,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 2, 8, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    };
+    // clang-format on
 
-    char *end = *out;
-    uint32_t codepoint;
-    switch (kLengths[(c[0] >> 3) - 16]) {
-        case 2:
-            if (((c[1] = GET_BYTE(ptr)) & 0xC0) != 0x80) {
-                return -1;
-            }
-            *end++ = (char)c[0];
-            *end++ = (char)c[1];
-            codepoint = ((uint32_t)(c[0] & 0x1F) << 6) | //
-                        ((uint32_t)(c[1] & 0x3F) << 0);
-            break;
-        case 3:
-            if (((c[1] = GET_BYTE(ptr)) & 0xC0) != 0x80 || //
-                ((c[2] = GET_BYTE(ptr)) & 0xC0) != 0x80) {
-                return -1;
-            }
-            *end++ = (char)c[0];
-            *end++ = (char)c[1];
-            *end++ = (char)c[2];
-            codepoint = ((uint32_t)(c[0] & 0x0F) << 12) | //
-                        ((uint32_t)(c[1] & 0x3F) << 6) |  //
-                        ((uint32_t)(c[2] & 0x3F) << 0);
-            break;
-        case 4:
-            if (((c[1] = GET_BYTE(ptr)) & 0xC0) != 0x80 || //
-                ((c[2] = GET_BYTE(ptr)) & 0xC0) != 0x80 || //
-                ((c[3] = GET_BYTE(ptr)) & 0xC0) != 0x80) {
-                return -1;
-            }
-            *end++ = (char)c[0];
-            *end++ = (char)c[1];
-            *end++ = (char)c[2];
-            *end++ = (char)c[3];
-            codepoint = ((uint32_t)(c[0] & 0x07) << 18) | //
-                        ((uint32_t)(c[1] & 0x3F) << 12) | //
-                        ((uint32_t)(c[2] & 0x3F) << 6) |  //
-                        ((uint32_t)(c[3] & 0x3F) << 0);
-            break;
-        default:
-            return -1;
-    }
-    *out = end;
-    return codepoint >= 0xD800 && codepoint <= 0xDFFF ? -1 : 0;
+    uint32_t state = 0;
+    do {
+        const uint8_t c = (uint8_t)peekChar(ptr);
+        state = kLookup1[c] + state * 12;
+        state = kLookup2[state];
+        *out[0] = getChar(ptr);
+        ++*out;
+    } while (state % 8 != 0);
+    return state ? -1 : 0;
 }
 
 static enum Token scanString(struct ParseState *s, const char **ptr)
@@ -308,108 +328,112 @@ static enum Token scanString(struct ParseState *s, const char **ptr)
     // process only ever decreases the length of a string, so this will always work.
     char *out = (char *)*ptr;
     const char *begin = *ptr;
+    char c;
+
     for (;;) {
-        // If c is not EOF, then we can call getChar() at least 4 times without going
-        // past the end of the buffer.
-        const char c = getChar(ptr);
-        switch (c) {
+handle_ascii:
+        c = getChar(ptr);
+        if (ISASCIIEND(c)) {
+            goto handle_non_ascii;
+        } else {
+            *out++ = c;
+        }
+    }
+handle_non_ascii:
+    if (c == '\\') {
+        switch (getChar(ptr)) {
+            case '"':
+                *out++ = '"';
+                break;
             case '\\':
-                switch (getChar(ptr)) {
-                    case '"':
-                        *out++ = '"';
-                        break;
-                    case '\\':
-                        *out++ = '\\';
-                        break;
-                    case '/':
-                        *out++ = '/';
-                        break;
-                    case 'b':
-                        *out++ = '\b';
-                        break;
-                    case 'f':
-                        *out++ = '\f';
-                        break;
-                    case 'n':
-                        *out++ = '\n';
-                        break;
-                    case 'r':
-                        *out++ = '\r';
-                        break;
-                    case 't':
-                        *out++ = '\t';
-                        break;
-                    case 'u': {
-                        int codepoint = getCodepoint(ptr);
-                        if (codepoint < 0) {
+                *out++ = '\\';
+                break;
+            case '/':
+                *out++ = '/';
+                break;
+            case 'b':
+                *out++ = '\b';
+                break;
+            case 'f':
+                *out++ = '\f';
+                break;
+            case 'n':
+                *out++ = '\n';
+                break;
+            case 'r':
+                *out++ = '\r';
+                break;
+            case 't':
+                *out++ = '\t';
+                break;
+            case 'u': {
+                int codepoint = getCodepoint(ptr);
+                if (codepoint < 0) {
+                    s->status = kStatusStringInvalidCodepoint;
+                    return kTokenError;
+                }
+                if (0xD800 <= codepoint && codepoint <= 0xDFFF) {
+                    // Codepoint is part of a surrogate pair. Expect a high surrogate
+                    // (U+D800–U+DBFF) followed by a low surrogate (U+DC00–U+DFFF).
+                    if (codepoint <= 0xDBFF) {
+                        if (getChar(ptr) != '\\' || getChar(ptr) != 'u') {
                             s->status = kStatusStringInvalidCodepoint;
                             return kTokenError;
                         }
-                        if (0xD800 <= codepoint && codepoint <= 0xDFFF) {
-                            // Codepoint is part of a surrogate pair. Expect a high surrogate
-                            // (U+D800–U+DBFF) followed by a low surrogate (U+DC00–U+DFFF).
-                            if (codepoint <= 0xDBFF) {
-                                if (getChar(ptr) != '\\' || getChar(ptr) != 'u') {
-                                    s->status = kStatusStringInvalidCodepoint;
-                                    return kTokenError;
-                                }
-                                const int codepoint2 = getCodepoint(ptr);
-                                if (codepoint2 < 0xDC00 || codepoint2 > 0xDFFF) {
-                                    s->status = kStatusStringMissingLowSurrogate;
-                                    return kTokenError;
-                                }
-                                codepoint = (((codepoint - 0xD800) << 10) | (codepoint2 - 0xDC00)) +
-                                            0x10000;
-                            } else {
-                                s->status = kStatusStringMissingHighSurrogate;
-                                return kTokenError;
-                            }
+                        const int codepoint2 = getCodepoint(ptr);
+                        if (codepoint2 < 0xDC00 || codepoint2 > 0xDFFF) {
+                            s->status = kStatusStringMissingLowSurrogate;
+                            return kTokenError;
                         }
-                        // Translate the codepoint into bytes. Modified from @Tencent/rapidjson.
-                        if (codepoint <= 0x7F) {
-                            *out++ = (char)codepoint;
-                        } else if (codepoint <= 0x7FF) {
-                            *out++ = (char)(0xC0 | ((codepoint >> 6) & 0xFF));
-                            *out++ = (char)(0x80 | ((codepoint & 0x3F)));
-                        } else if (codepoint <= 0xFFFF) {
-                            *out++ = (char)(0xE0 | ((codepoint >> 12) & 0xFF));
-                            *out++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-                            *out++ = (char)(0x80 | (codepoint & 0x3F));
-                        } else {
-                            assert(codepoint <= 0x10FFFF);
-                            *out++ = (char)(0xF0 | ((codepoint >> 18) & 0xFF));
-                            *out++ = (char)(0x80 | ((codepoint >> 12) & 0x3F));
-                            *out++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-                            *out++ = (char)(0x80 | (codepoint & 0x3F));
-                        }
-                        break;
-                    }
-                    default:
-                        s->status = kStatusStringInvalidEscape;
+                        codepoint =
+                            (((codepoint - 0xD800) << 10) | (codepoint2 - 0xDC00)) + 0x10000;
+                    } else {
+                        s->status = kStatusStringMissingHighSurrogate;
                         return kTokenError;
+                    }
+                }
+                // Translate the codepoint into bytes. Modified from @Tencent/rapidjson.
+                if (codepoint <= 0x7F) {
+                    *out++ = (char)codepoint;
+                } else if (codepoint <= 0x7FF) {
+                    *out++ = (char)(0xC0 | ((codepoint >> 6) & 0xFF));
+                    *out++ = (char)(0x80 | ((codepoint & 0x3F)));
+                } else if (codepoint <= 0xFFFF) {
+                    *out++ = (char)(0xE0 | ((codepoint >> 12) & 0xFF));
+                    *out++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                    *out++ = (char)(0x80 | (codepoint & 0x3F));
+                } else {
+                    assert(codepoint <= 0x10FFFF);
+                    *out++ = (char)(0xF0 | ((codepoint >> 18) & 0xFF));
+                    *out++ = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+                    *out++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                    *out++ = (char)(0x80 | (codepoint & 0x3F));
                 }
                 break;
-            case '"': {
-                // Closing double quote finishes the string.
-                s->value = (JsonValue){
-                    .type = kTypeString,
-                    .size = out - begin,
-                    .v = {.string = begin},
-                };
-                return kTokenString;
             }
             default:
-                if ((uint8_t)c < 0x20) {
-                    s->status = kStatusStringUnescapedControl;
-                    return kTokenError;
-                } else if ((uint8_t)c < 0x80) {
-                    *out++ = c;
-                } else if (scanUtf8(ptr, &out, c)) {
-                    s->status = kStatusStringInvalidUtf8;
-                    return kTokenError;
-                }
+                s->status = kStatusStringInvalidEscape;
+                return kTokenError;
         }
+    } else if (c == '"') {
+        // Closing double quote finishes the string.
+        s->value = (JsonValue){
+            .type = kTypeString,
+            .size = out - begin,
+            .v = {.string = begin},
+        };
+        return kTokenString;
+    } else if (ISNONASCII(c)) {
+        ungetChar(ptr);
+        if (scanUtf8(ptr, &out)) {
+            s->status = kStatusStringInvalidUtf8;
+            return kTokenError;
+        }
+    } else {
+        s->status = kStatusStringUnescapedControl;
+        return kTokenError;
     }
+    goto handle_ascii;
 }
 
 static enum Token scanReal(struct ParseState *s, const char **ptr, JsonBool isNegative)
@@ -905,225 +929,4 @@ JsonBool jsonBoolean(const JsonValue *value)
 {
     assert(jsonType(value) == kTypeBoolean);
     return value->v.boolean;
-}
-
-struct Writer {
-    char *ptr;
-    JsonSize len;
-    JsonSize acc;
-    JsonBool sep;
-};
-
-static void appendChar(struct Writer *w, char c)
-{
-    ++w->acc;
-    if (w->len > 0) {
-        w->ptr[0] = c;
-        ++w->ptr;
-        --w->len;
-    }
-}
-
-// This function seems to generate nicer assembly than calling appendChar() 4 times.
-static void appendChar4(struct Writer *w, const char *c4)
-{
-    w->acc += 4;
-    if (w->len >= 4) {
-        *w->ptr++ = *c4++;
-        *w->ptr++ = *c4++;
-        *w->ptr++ = *c4++;
-        *w->ptr++ = *c4++;
-        w->len -= 4;
-    }
-}
-
-static void appendString(struct Writer *w, const char *str, JsonSize len)
-{
-    w->acc += len;
-    if (len > 0 && len <= w->len) {
-        memcpy(w->ptr, str, (size_t)len);
-        w->ptr += len;
-        w->len -= len;
-    }
-}
-
-static void appendFiniteReal(struct Writer *w, double v)
-{
-    assert(isfinite(v));
-
-    char buf[32];
-    static const int kMaxDigits = DBL_DECIMAL_DIG;
-    JsonSize len = snprintf(buf, COUNTOF(buf), "%.*g", kMaxDigits, v);
-    // Make sure the printed number contains some indication that it is a real number rather than
-    // an integer. This step is very important: otherwise, we get strange problems, like "-0.0"
-    // being written as "-0", which is stored as the integer 0. Tests that attempt to roundtrip
-    // "-0.0", or any other real that rounds to it, will fail. Also converts ',' to '.'  (some
-    // locales use ',' as their decimal point, but RFC 8259 specifies '.').
-    JsonBool foundFpChar = 0;
-    for (JsonSize i = 0; i < len; i++) {
-        if (buf[i] == ',') {
-            // TODO: Add a test that covers this (may need to consult the current locale)
-            buf[i] = '.';
-        }
-        if (ISFPCHAR(buf[i])) {
-            foundFpChar = 1;
-        }
-    }
-    if (!foundFpChar) {
-        buf[len++] = '.';
-        buf[len++] = '0';
-    }
-    appendString(w, buf, len);
-}
-
-// NOTE: This function is a bit faster than using snprintf(), and has the added benefit of not
-//       requiring inclusion of inttypes.h to get the proper format specifier ("%" PRId64).
-static void appendInteger(struct Writer *w, int64_t integer)
-{
-    // This buffer should have a single extra byte in the worst case.
-    char buffer[32];
-    const JsonBool negative = integer < 0;
-    char *end = buffer + COUNTOF(buffer);
-    char *ptr = end - 1;
-    // Don't call llabs(INT64_MIN). The result is undefined on 2s complement systems.
-    uint64_t u = integer == INT64_MIN ? (1ULL << 63) : (uint64_t)llabs(integer);
-    do {
-        *ptr-- = (char)(u % 10 + '0');
-        u /= 10;
-    } while (u);
-    if (negative) {
-        *ptr = '-';
-    } else {
-        ++ptr;
-    }
-    appendString(w, ptr, (JsonSize)(end - ptr));
-}
-
-// Modified from SQLite (src/json.c).
-static void appendEscapedString(struct Writer *w, const char *str, JsonSize len)
-{
-    appendChar(w, '"');
-    for (JsonSize i = 0; i < len; i++) {
-        uint8_t c = ((uint8_t *)str)[i];
-        if (c == '"' || c == '\\') {
-json_simple_escape:
-            appendChar(w, '\\');
-        } else if (c <= 0x1F) {
-            static const char kSpecialChars[] = {
-                0, 0, 0, 0, 0, 0, 0, 0, 'b', 't', 'n', 0, 'f', 'r', 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0,   0,   0,   0, 0,   0,   0, 0,
-            };
-            assert(COUNTOF(kSpecialChars) == 32);
-            assert(kSpecialChars['\b'] == 'b');
-            assert(kSpecialChars['\f'] == 'f');
-            assert(kSpecialChars['\n'] == 'n');
-            assert(kSpecialChars['\r'] == 'r');
-            assert(kSpecialChars['\t'] == 't');
-            if (kSpecialChars[c]) {
-                c = (uint8_t)kSpecialChars[c];
-                goto json_simple_escape;
-            }
-            appendChar4(w, "\\u00");
-            appendChar(w, (char)('0' + (c >> 4)));
-            c = (uint8_t) "0123456789abcdef"[c & 0xF];
-        }
-        appendChar(w, (char)c);
-    }
-    appendChar(w, '"');
-}
-
-static void testWriteValue(struct Writer *w, const JsonValue *value)
-{
-    switch (jsonType(value)) {
-        case kTypeString:
-            appendEscapedString(w, jsonString(value), jsonLength(value));
-            break;
-        case kTypeInteger:
-            appendInteger(w, jsonInteger(value));
-            break;
-        case kTypeBoolean:
-            if (jsonBoolean(value)) {
-                appendChar4(w, "true");
-            } else {
-                appendChar4(w, "fals");
-                appendChar(w, 'e');
-            }
-            break;
-        case kTypeReal:
-            if (isfinite(jsonReal(value))) {
-                appendFiniteReal(w, jsonReal(value));
-                break;
-            }
-            // Intentional fallthrough: convert +/-Inf into null.
-        default: // kTypeNull
-            appendChar4(w, "null");
-            break;
-    }
-}
-
-static void minifyMaybeAddComma(struct Writer *w, JsonBool sepAfter)
-{
-    if (w->sep) {
-        appendChar(w, ',');
-    }
-    w->sep = sepAfter;
-}
-
-static JsonBool minifyAcceptKey(void *ctx, const char *key, JsonSize length)
-{
-    struct Writer *w = ctx;
-    minifyMaybeAddComma(w, FALSE);
-    appendEscapedString(w, key, length);
-    appendChar(w, ':');
-    return TRUE;
-}
-
-static JsonBool minifyAcceptValue(void *ctx, const JsonValue *value)
-{
-    struct Writer *w = ctx;
-    minifyMaybeAddComma(w, TRUE);
-    testWriteValue(w, value);
-    return TRUE;
-}
-
-static JsonBool minifyBeginContainer(void *ctx, JsonBool isObject)
-{
-    struct Writer *w = ctx;
-    minifyMaybeAddComma(w, FALSE);
-    if (isObject) {
-        appendChar(w, '{');
-    } else {
-        appendChar(w, '[');
-    }
-    return TRUE;
-}
-
-static JsonBool minifyEndContainer(void *ctx, JsonBool isObject)
-{
-    struct Writer *w = ctx;
-    if (isObject) {
-        appendChar(w, '}');
-    } else {
-        appendChar(w, ']');
-    }
-    w->sep = TRUE;
-    return TRUE;
-}
-
-MEWJSON_NODISCARD
-JsonSize jsonMinify(const char *input, JsonSize inputLen, char *output, JsonSize outputLen,
-                    struct JsonParser *parser)
-{
-    struct Writer w = {.ptr = output, .len = outputLen};
-    struct JsonHandler userH = parser->h; // Save the user handler
-    parser->h = (struct JsonHandler){
-        .ctx = &w,
-        .acceptKey = minifyAcceptKey,
-        .acceptValue = minifyAcceptValue,
-        .beginContainer = minifyBeginContainer,
-        .endContainer = minifyEndContainer,
-    };
-    const enum JsonStatus s = jsonParse(input, inputLen, parser);
-    parser->h = userH; // Restore the user handler
-    return s == kStatusOk ? w.acc : -1;
 }
