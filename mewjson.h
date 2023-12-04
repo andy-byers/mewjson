@@ -127,15 +127,4 @@ void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct Jso
 MEWJSON_NODISCARD
 enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser *parser);
 
-// Minify a JSON document
-// If a handler was set on the parser, it will be ignored for the duration of this function.
-// Returns the number of bytes needed to hold the minified text. If there was not enough space
-// in the output buffer, then the partially-written contents may be malformed (in addition to
-// being truncated). This function does not add a null terminator. On failure, returns -1 and
-// sets parser->status and parser->offset to indicate what went wrong and where the parser
-// stopped, respectively.
-MEWJSON_NODISCARD
-JsonSize jsonMinify(const char *input, JsonSize inputLen, char *output, JsonSize outputLen,
-                    struct JsonParser *parser);
-
 #endif // MEWJSON_H

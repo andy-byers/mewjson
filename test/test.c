@@ -95,6 +95,14 @@ static struct JsonAllocator sAllocator = {
     testFree,
 };
 
+// Tags to indicate which handler function to return 0 from
+enum {
+    kStopAcceptKey = kTypeCount,
+    kStopBeginContainer,
+    kStopEndContainer,
+    kStopTypeCount,
+};
+
 struct TestcaseContext {
     struct JsonHandler base;
     void *backing;
@@ -111,13 +119,11 @@ struct TestcaseContext {
     double *rBuf;
     double *rPtr;
 
-    // Tags to indicate which handler function to return 0 from
-    enum {
-        kStopAcceptKey = kTypeCount,
-        kStopBeginContainer,
-        kStopEndContainer,
-        kStopTypeCount,
-    };
+    // Write the last boolean encountered during the parse to this variable
+    JsonBool lastBoolean;
+
+    // True if the parser has encountered a null, false otherwise
+    JsonBool seenNull;
 
     // Stop the parse when this type of JSON value is encountered
     int stopType;
@@ -160,12 +166,18 @@ static JsonBool testAcceptKey(void *ctx, const char *key, JsonSize length)
 static JsonBool testAcceptValue(void *ctx, const JsonValue *value)
 {
     struct TestcaseContext *tc = ctx;
-    if (jsonType(value) == kTypeInteger) {
+    const enum JsonType type = jsonType(value);
+    if (type == kTypeInteger) {
         contextPushInteger(tc, jsonInteger(value));
-    } else if (jsonType(value) == kTypeReal) {
+    } else if (type == kTypeReal) {
         contextPushReal(tc, jsonReal(value));
-    } else if (jsonType(value) == kTypeString) {
+    } else if (type == kTypeString) {
         contextSetString(tc, jsonString(value), jsonLength(value));
+    } else if (type == kTypeBoolean) {
+        tc->lastBoolean = jsonBoolean(value);
+    } else {
+        CHECK(type == kTypeNull);
+        tc->seenNull = 1;
     }
     return tc->stopType != (int)jsonType(value);
 }
@@ -494,6 +506,8 @@ static const char *kNoTestNames[] = {
     "i_string_utf16BE_no_BOM",
     "i_string_utf16LE_no_BOM",
     "i_string_UTF8_surrogate_U+D800",
+    "i_string_overlong_sequence_2_bytes",
+    "i_string_not_in_unicode_range",
 
     // Doesn't support BOM.
     "i_structure_UTF-8_BOM_empty_object",
@@ -623,8 +637,7 @@ static const char *kYesTestNames[] = {
     "pass26",
     "pass27",
 
-    // Overflowing integers become reals. Overflowing reals become Inf or -Inf and are
-    // written as "null" by jsonWrite().
+    // Overflowing integers become reals.
     "i_number_double_huge_neg_exp",
     "i_number_huge_exp",
     "i_number_neg_int_huge_exp",
@@ -643,10 +656,6 @@ static const char *kYesTestNames[] = {
     // +/-Inf. jsonWrite() will write them as nulls.
     "fail60",
     "fail73",
-
-    // TODO: These should fail due to bad UTF-8.
-    "i_string_overlong_sequence_2_bytes",
-    "i_string_not_in_unicode_range",
 };
 
 // clang-format off
@@ -659,7 +668,7 @@ static struct Testcase {
         kTestcaseYes,
     } type;
 } sInternalTestcases[] = {
-#define YES(a, b) {.name = CAT(y_, a), .input = b, .inputLen = (JsonSize)strlen(b), .type = kTestcaseYes},
+#define YES(a, b) {.name = CAT(y_, a), .input = b, .inputLen = (JsonSize)SIZEOF(b) - 1, .type = kTestcaseYes},
     YES(structure_complicated, "[{\"a\":[{}]},{\"b\":[{\"c\":[[],[],[true]],\"d\":null}]}]")
     YES(array_nested, "[1,[2,[3,4],5,[6,7],8],9,[10,[11,12],13,[14,15],16],17]")
     YES(number_simple_int, "123")
@@ -698,7 +707,7 @@ static struct Testcase {
     YES(number_tiny_negative_real, "-1.0e-123")
     YES(number_negative_zero, "-0.0")
 
-#define NO(a, b) {.name = CAT(n_, a), .input = b, .inputLen = (JsonSize)strlen(b), .type = kTestcaseNo},
+#define NO(a, b) {.name = CAT(n_, a), .input = b, .inputLen = (JsonSize)SIZEOF(b) - 1, .type = kTestcaseNo},
     NO(string_missing_high_surrogate, "\"\\uDC00\"")
     NO(object_with_trailing_comment, "{\"a\":\"b\"}/*comment*/")
     NO(object_with_leading_comment, "/*comment*/{\"a\":\"b\"}")
@@ -798,31 +807,14 @@ static void testcaseRun(struct Testcase *tc)
 
     struct JsonParser parser;
     testParserInit(&parser, NULL);
-    // Determine how many bytes are needed to minify tc->input. Returns -1 if the parse fails.
-    const JsonSize outputLen = jsonMinify(tc->input, tc->inputLen, NULL, 0, &parser);
+    const enum JsonStatus s = jsonParse(tc->input, tc->inputLen, &parser);
     if (tc->type == kTestcaseNo) {
         // Must fail for a reason other than running out of memory. OOM conditions are tested
         // separately (see TestcaseReaderOom()).
-        CHECK(parser.status != kStatusOk);
-        CHECK(parser.status != kStatusNoMemory);
-        CHECK(outputLen < 0);
+        CHECK(s != kStatusOk);
+        CHECK(s != kStatusNoMemory);
     } else {
-        // A valid JSON document is never empty.
-        CHECK(outputLen > 0);
-        char *output = malloc((size_t)outputLen + 1);
-        // Roundtrip the JSON data. First minify to "output", then minify "output" to "output2".
-        CHECK(outputLen == jsonMinify(tc->input, tc->inputLen, output, outputLen, &parser));
-        CHECK(parser.status == kStatusOk);
-        output[outputLen] = '\0';
-        puts(output);
-        char *output2 = malloc((size_t)outputLen);
-        CHECK(outputLen == jsonMinify(output, outputLen, output2, outputLen, &parser));
-        CHECK(kStatusOk == parser.status);
-        CHECK(outputLen == parser.offset);
-        // Minified contents should match exactly.
-        CHECK(0 == memcmp(output, output2, (size_t)outputLen));
-        free(output2);
-        free(output);
+        CHECK(s == kStatusOk);
     }
 }
 
@@ -843,17 +835,12 @@ static void testcaseLargeNumbers(void)
 static void testcaseExceedMaxDepth(void)
 {
     testcaseInit("exceed_max_depth");
-    const JsonSize kDepth = 100000;
-    char *buffer = malloc(kDepth + 1);
-    for (size_t depth = 0; depth < kDepth; ++depth) {
-        buffer[depth] = '[';
-    }
-    buffer[kDepth] = '\0';
+    static char sText[100000];
+    memset(sText, '[', (size_t)SIZEOF(sText));
 
     struct JsonParser parser;
     testParserInit(&parser, NULL);
-    CHECK(kStatusExceededMaxDepth == jsonParse(buffer, (JsonSize)strlen(buffer), &parser));
-    free(buffer);
+    CHECK(kStatusExceededMaxDepth == jsonParse(sText, SIZEOF(sText), &parser));
 }
 
 static void testcaseParseErrors(void)
@@ -949,11 +936,11 @@ static void runOnePassFailTest(const char *name, enum TestcaseType type)
 
 static void runExternalPassFailTests(void)
 {
-    for (JsonSize i = 0; i < COUNTOF(kNoTestNames); ++i) {
-        runOnePassFailTest(kNoTestNames[i], kTestcaseNo);
-    }
     for (JsonSize i = 0; i < COUNTOF(kYesTestNames); ++i) {
         runOnePassFailTest(kYesTestNames[i], kTestcaseYes);
+    }
+    for (JsonSize i = 0; i < COUNTOF(kNoTestNames); ++i) {
+        runOnePassFailTest(kNoTestNames[i], kTestcaseNo);
     }
 }
 
@@ -1019,8 +1006,143 @@ static void testcaseRealIdentity(void)
     testCheckReal("9223372036854775808.5", (double)INT64_MAX + 1.5);
 }
 
+static void testCheckLiteral(const char *input, JsonBool expectNull, JsonBool booleanValue)
+{
+    struct JsonParser parser;
+    struct TestcaseContext ctx;
+    testParserInit(&parser, &ctx);
+    CHECK(kStatusOk == jsonParse(input, (JsonSize)strlen(input), &parser));
+    if (expectNull) {
+        CHECK(ctx.seenNull);
+    } else if (booleanValue) {
+        CHECK(ctx.lastBoolean);
+    } else {
+        CHECK(!ctx.lastBoolean);
+    }
+}
+
+static void testcaseLiteralIdentity(void)
+{
+    testcaseInit("number_real");
+    testCheckLiteral("null", 1, 0);
+    testCheckLiteral("false", 0, 0);
+    testCheckLiteral("true", 0, 1);
+}
+
+static void testCheckUtf8(const char *input, JsonBool expectOk)
+{
+    struct JsonParser parser;
+    struct TestcaseContext ctx;
+    testParserInit(&parser, &ctx);
+    const enum JsonStatus s = jsonParse(input, (JsonSize)strlen(input), &parser);
+    if (expectOk) {
+        CHECK(s == kStatusOk);
+    } else {
+        CHECK(s == kStatusStringInvalidUtf8);
+    }
+}
+
+static void testcaseUtf8(void)
+{
+    static const struct {
+        const char *text;
+        JsonBool isValid;
+    } kUtf8[] = {
+        // From @golang/go
+        {"\"\xF4\x8F\xBF\xBF\"", 1}, // U+10FFFF
+        {"\"\"", 1},
+        {"\"a\"", 1},
+        {"\"abc\"", 1},
+        {"\"Ж\"", 1},
+        {"\"ЖЖ\"", 1},
+        {"\"брэд-ЛГТМ\"", 1},
+        {"\"☺☻☹\"", 1},
+        {"\"\"", 1},
+        {"\"abcd\"", 1},
+        {"\"☺☻☹\"", 1},
+        {"\"日a本b語ç日ð本Ê語þ日¥本¼語i日©\"", 1},
+        {"\"日a本b語ç日ð本Ê語þ日¥本¼語i日©日a本b語ç日ð本Ê語þ日¥本¼語i日©日a本b語ç日ð本Ê語þ日¥本¼語i"
+         "日©\"",
+         1},
+        {"\"abcdefg abcdefg abcdefg abcdefg \"", 1},
+        {"\"abcdefg abcdefg abcdefg abcdefg abcdefghabcdefghabcdefghabcdefgh\"", 1},
+
+        // From @rusticstuff/simdutf8
+        {"\"öäüÖÄÜß\"", 1},   // umlauts
+        {"\"❤️✨🥺🔥😂😊✔️👍🥰\"", 1}, // emojis
+        {"\"断用山昨屈内銀代意検瓶調像。情旗最投任留財夜隆年表高学送意功者。辺図掲記込真通第民国聞"
+         "平。海帰傷芸記築世防橋整済歳権君注。選紙例並情夕破勢景移情誇進場豊読。景関有権米武野範随"
+         "惑旬特覧刊野。相毎加共情面教地作減関絡。暖料児違歩致本感閉浦出楽赤何。時選権週邑針格事提"
+         "一案質名投百定。止感右聞食三年外積文載者別。\"",
+         1}, // Chinese
+        {"\"意ざど禁23費サヒ車園オスミト規更ワエ異67事続トソキ音合岡治こ訪京ぴ日9稿がト明安イ抗的ウ"
+         "クロコ売一エコヨホ必噴塗ッ。索墓ー足議需レ応予ニ質県トぴン学市機だほせフ車捕コニ自校がこ"
+         "で極3力イい増娘汁表製ク。委セヤホネ作誌ミマクソ続新ほし月中報制どてびフ字78完りっせが村惹"
+         "ヨサコ訳器りそ参受草ムタ大移ッけでつ番足ほこン質北ぽのよう応一ア輝労イ手人う再茨夕へしう"
+         "。\"",
+         1}, // Japanese
+        {"\"3인은 대법원장이 지명하는 자를 임명한다, 대통령은 제3항과 제4항의 사유를 지체없이 "
+         "공포하여야 한다, 제한하는 경우에도 자유와 권리의 본질적인 내용을 침해할 수 없다, 국가는 "
+         "전통문화의 계승·발전과 민족문화의 창달에 노력하여야 한다.\"",
+         1}, // Korean
+
+        // From @golang/go
+        {"\"\x80\x80\x80\x80\"", 0},
+        {"\"\xed\xa0\x80\x80\"", 0}, // surrogate min
+        {"\"\xed\xbf\xbf\x80\"", 0}, // surrogate max
+        {"\"\x91\x80\x80\x80\"", 0}, // xx
+        {"\"\xC2\x7F\x80\x80\"", 0}, // s1
+        {"\"\xC2\xC0\x80\x80\"", 0},
+        {"\"\xDF\x7F\x80\x80\"", 0},
+        {"\"\xDF\xC0\x80\x80\"", 0},
+        {"\"\xE0\x9F\xBF\x80\"", 0}, // s2
+        {"\"\xE0\xA0\x7F\x80\"", 0},
+        {"\"\xE0\xBF\xC0\x80\"", 0},
+        {"\"\xE0\xC0\x80\x80\"", 0},
+        {"\"\xE1\x7F\xBF\x80\"", 0}, // s3
+        {"\"\xE1\x80\x7F\x80\"", 0},
+        {"\"\xE1\xBF\xC0\x80\"", 0},
+        {"\"\xE1\xC0\x80\x80\"", 0},
+        {"\"\xED\x7F\xBF\x80\"", 0}, // s4
+        {"\"\xED\x80\x7F\x80\"", 0},
+        {"\"\xED\x9F\xC0\x80\"", 0},
+        {"\"\xED\xA0\x80\x80\"", 0},
+        {"\"\xF0\x8F\xBF\xBF\"", 0}, // s5
+        {"\"\xF0\x90\x7F\xBF\"", 0},
+        {"\"\xF0\x90\x80\x7F\"", 0},
+        {"\"\xF0\xBF\xBF\xC0\"", 0},
+        {"\"\xF0\xBF\xC0\x80\"", 0},
+        {"\"\xF0\xC0\x80\x80\"", 0},
+        {"\"\xF1\x7F\xBF\xBF\"", 0}, // s6
+        {"\"\xF1\x80\x7F\xBF\"", 0},
+        {"\"\xF1\x80\x80\x7F\"", 0},
+        {"\"\xF1\xBF\xBF\xC0\"", 0},
+        {"\"\xF1\xBF\xC0\x80\"", 0},
+        {"\"\xF1\xC0\x80\x80\"", 0},
+        {"\"\xF4\x7F\xBF\xBF\"", 0}, // s7
+        {"\"\xF4\x80\x7F\xBF\"", 0},
+        {"\"\xF4\x80\x80\x7F\"", 0},
+        {"\"\xF4\x8F\xBF\xC0\"", 0},
+        {"\"\xF4\x8F\xC0\x80\"", 0},
+        {"\"\xF4\x90\x80\x80\"", 0},     // U+10FFFF+1; out of range
+        {"\"\xF7\xBF\xBF\xBF\"", 0},     // 0x1FFFFF; out of range
+        {"\"\xFB\xBF\xBF\xBF\xBF\"", 0}, // 0x3FFFFFF; out of range
+        {"\"\xc0\x80\"", 0},             // U+0000 encoded in two bytes: incorrect
+        {"\"\xed\xa0\x80\"", 0},         // U+D800 high surrogate (sic)
+        {"\"\xed\xbf\xbf\"", 0},         // U+DFFF low surrogate (sic)
+        {"\"aa\xe2\"", 0},
+    };
+    char buffer[1024];
+    for (JsonSize i = 0; i < COUNTOF(kUtf8); ++i) {
+        strcpy(buffer, kUtf8[i].text);
+        testCheckUtf8(buffer, kUtf8[i].isValid);
+    }
+}
+
 int main(void)
 {
+    testcaseLiteralIdentity();
+    testcaseUtf8(); // todo: move down
     puts("* * * running mewjson tests * * *");
 
     sanityCheckRealEquality();
