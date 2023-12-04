@@ -17,9 +17,14 @@ option(MEWJSON_BuildFuzzers "Build the fuzz targets" Off)
 option(MEWJSON_BuildTests "Build the tests" ${MAIN_PROJECT})
 
 add_library(mewjson_warnings INTERFACE)
-target_compile_options(mewjson_warnings
-        INTERFACE -Werror -Wall -Wextra -Wpedantic
-                  -Wsign-conversion -Wformat=2)
+if(${CMAKE_C_COMPILER_ID} STREQUAL MSVC)
+    target_compile_options(mewjson_warnings
+            INTERFACE /Wx /Wall)
+else()
+    target_compile_options(mewjson_warnings
+            INTERFACE -Werror -Wall -Wextra -Wpedantic
+                      -Wsign-conversion -Wformat=2)
+endif()
 
 add_library(mewjson STATIC)
 target_sources(mewjson
