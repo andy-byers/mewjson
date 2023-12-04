@@ -331,12 +331,11 @@ static enum Token scanString(struct ParseState *s, const char **ptr)
 handle_ascii:
         c = getChar(ptr);
         if (ISASCIIEND(c)) {
-            goto handle_non_ascii;
+            break;
         } else {
             *out++ = c;
         }
     }
-handle_non_ascii:
     if (c == '\\') {
         switch (getChar(ptr)) {
             case '"':
