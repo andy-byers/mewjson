@@ -5,4 +5,4 @@ target_link_libraries(test_parser
 target_compile_definitions(test_parser
         PRIVATE TESTCASE_PREFIX="${CMAKE_CURRENT_SOURCE_DIR}/testcases/")
 add_test(NAME test_parser
-        COMMAND test_parser)
+        COMMAND test_parser m)
