@@ -81,7 +81,7 @@ struct JsonValue {
         int64_t integer;
         double real;
         JsonBool boolean;
-    } v;
+    };
 };
 
 // State variables used during a parse
@@ -251,7 +251,7 @@ static enum Token scanTrue(struct ParseState *s, const char **ptr)
     if (getChar(ptr) == 'r' && //
         getChar(ptr) == 'u' && //
         getChar(ptr) == 'e') { //
-        s->value = (JsonValue){.type = kTypeBoolean, .v = {.boolean = 1}};
+        s->value = (JsonValue){.type = kTypeBoolean, .boolean = 1};
         return kTokenValue;
     }
     s->status = kStatusLiteralInvalid;
@@ -264,7 +264,7 @@ static enum Token scanFalse(struct ParseState *s, const char **ptr)
         getChar(ptr) == 'l' && //
         getChar(ptr) == 's' && //
         getChar(ptr) == 'e') { //
-        s->value = (JsonValue){.type = kTypeBoolean, .v = {.boolean = 0}};
+        s->value = (JsonValue){.type = kTypeBoolean, .boolean = 0};
         return kTokenValue;
     }
     s->status = kStatusLiteralInvalid;
@@ -276,7 +276,7 @@ MEWJSON_NODISCARD
 static JsonSize scanUtf8(const char **ptr, char **out)
 {
     // clang-format off
-    static uint8_t kLookup1[] = {
+    static uint8_t kLookup1[256] = {
          8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,
          8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,
          0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -294,7 +294,7 @@ static JsonSize scanUtf8(const char **ptr, char **out)
          4,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  5,  2,  2,
          6,  3,  3,  3,  7,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,
     };
-    static uint8_t kLookup2[] = {
+    static uint8_t kLookup2[108] = {
         0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8,
         8, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0,
         8, 8, 8, 8, 8, 8, 8, 8, 8, 1, 1, 1,
@@ -416,7 +416,7 @@ handle_ascii:
         s->value = (JsonValue){
             .type = kTypeString,
             .size = out - begin,
-            .v = {.string = begin},
+            .string = begin,
         };
         return kTokenString;
     } else if (ISNONASCII(c)) {
@@ -480,7 +480,7 @@ static enum Token scanReal(struct ParseState *s, const char **ptr, JsonBool isNe
     // Input has been padded with at least 1 byte that strtod() will not recognize as being part
     // of a real number. Otherwise, strtod() might continue reading past the end of the buffer.
     const double real = strtod(begin, NULL);
-    s->value = (JsonValue){.type = kTypeReal, .v = {.real = real}};
+    s->value = (JsonValue){.type = kTypeReal, .real = real};
     return kTokenValue;
 }
 
@@ -519,7 +519,7 @@ static enum Token scanNumber(struct ParseState *s, const char **ptr, JsonBool is
                 // If the number isn't exactly INT64_MIN, then it will overflow and must be
                 // parsed as a real.
                 if (isNegative && !ISNUMERIC(peekChar(ptr))) {
-                    s->value = (JsonValue){.type = kTypeInteger, .v = {.integer = INT64_MIN}};
+                    s->value = (JsonValue){.type = kTypeInteger, .integer = INT64_MIN};
                     return kTokenValue;
                 }
                 goto call_scan_real;
@@ -531,7 +531,7 @@ static enum Token scanNumber(struct ParseState *s, const char **ptr, JsonBool is
     if (!ISFPCHAR(peekChar(ptr))) {
         assert(value != INT64_MIN);
         value = isNegative ? -value : value;
-        s->value = (JsonValue){.type = kTypeInteger, .v = {.integer = value}};
+        s->value = (JsonValue){.type = kTypeInteger, .integer = value};
         return kTokenValue;
     }
 
@@ -731,7 +731,7 @@ static enum State parserAcceptKey(struct ParseState *s)
 {
     struct JsonHandler *h = &s->h;
     JsonValue *v = &s->value;
-    const JsonBool rc = h->acceptKey(h->ctx, v->v.string, v->size);
+    const JsonBool rc = h->acceptKey(h->ctx, v->string, v->size);
     return rc ? kO1 : kStateStop;
 }
 
@@ -906,23 +906,23 @@ JsonSize jsonLength(const JsonValue *value)
 const char *jsonString(const JsonValue *value)
 {
     assert(jsonType(value) == kTypeString);
-    return value->v.string;
+    return value->string;
 }
 
 int64_t jsonInteger(const JsonValue *value)
 {
     assert(jsonType(value) == kTypeInteger);
-    return value->v.integer;
+    return value->integer;
 }
 
 double jsonReal(const JsonValue *value)
 {
     assert(jsonType(value) == kTypeReal);
-    return value->v.real;
+    return value->real;
 }
 
 JsonBool jsonBoolean(const JsonValue *value)
 {
     assert(jsonType(value) == kTypeBoolean);
-    return value->v.boolean;
+    return value->boolean;
 }

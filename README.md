@@ -7,11 +7,11 @@ a tiny JSON parser
 ## Requirements
 The library requires the following to compile:
 + CMake version 3.14 or later
-+ C compiler with support for C99
++ C compiler with support for C11
 
 ## Caveats
 + Only supports SAX-style (callback-based) parsing
-+ Parser uses dynamic memory, usually about equal to the size of the input
++ Parser uses dynamic memory (usually 1 allocation, about equal to the size of the input)
 + Real number parsing is very slow (uses `strtod()`)
 
 ## API
