@@ -221,17 +221,16 @@ static char skipWhitespace(const char **ptr)
 MEWJSON_NODISCARD
 static int getCodepoint(const char **ptr)
 {
-    char c[4];
-    if (!ISHEX(c[0] = getChar(ptr)) || //
-        !ISHEX(c[1] = getChar(ptr)) || //
-        !ISHEX(c[2] = getChar(ptr)) || //
-        !ISHEX(c[3] = getChar(ptr))) { //
+    if (!ISHEX((*ptr)[0]) || //
+        !ISHEX((*ptr)[1]) || //
+        !ISHEX((*ptr)[2]) || //
+        !ISHEX((*ptr)[3])) { //
         return -1;
     }
-    return HEXVAL(c[0]) << 12 | //
-           HEXVAL(c[1]) << 8 |  //
-           HEXVAL(c[2]) << 4 |  //
-           HEXVAL(c[3]);        //
+    return HEXVAL(getChar(ptr)) << 12 | //
+           HEXVAL(getChar(ptr)) << 8 |  //
+           HEXVAL(getChar(ptr)) << 4 |  //
+           HEXVAL(getChar(ptr));        //
 }
 
 static enum Token scanNull(struct ParseState *s, const char **ptr)
@@ -327,16 +326,41 @@ static enum Token scanString(struct ParseState *s, const char **ptr)
     const char *begin = *ptr;
     char c;
 
+#define CHECK_ASCII(n, body)                                                                       \
+    if (ISASCIIEND(c = (*ptr)[n])) {                                                               \
+        body;                                                                                      \
+        *ptr += (n);                                                                               \
+        break;                                                                                     \
+    }
+
     for (;;) {
 handle_ascii:
-        c = getChar(ptr);
-        if (ISASCIIEND(c)) {
-            break;
-        } else {
-            *out++ = c;
-        }
+        // This ends up being a very hot loop for JSON documents containing strings. It has been
+        // unrolled for better performance.
+        CHECK_ASCII(0, {})
+        CHECK_ASCII(1, {
+            // Copy ASCII byte to unescaped string
+            out[0] = (*ptr)[0];
+        })
+        CHECK_ASCII(2, {
+            out[0] = (*ptr)[0];
+            out[1] = (*ptr)[1];
+        })
+        CHECK_ASCII(3, {
+            out[0] = (*ptr)[0];
+            out[1] = (*ptr)[1];
+            out[2] = (*ptr)[2];
+        })
+        out[0] = (*ptr)[0];
+        out[1] = (*ptr)[1];
+        out[2] = (*ptr)[2];
+        out[3] = (*ptr)[3];
+        *ptr += 4;
     }
+#undef CHECK_ASCII
+
     if (c == '\\') {
+        ++*ptr;
         switch (getChar(ptr)) {
             case '"':
                 *out++ = '"';
@@ -418,9 +442,9 @@ handle_ascii:
             .size = out - begin,
             .string = begin,
         };
+        ++*ptr;
         return kTokenString;
     } else if (ISNONASCII(c)) {
-        ungetChar(ptr);
         if (scanUtf8(ptr, &out)) {
             s->status = kStatusStringInvalidUtf8;
             return kTokenError;
