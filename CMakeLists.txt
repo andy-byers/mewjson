@@ -19,7 +19,7 @@ option(MEWJSON_BuildTests "Build the tests" ${MAIN_PROJECT})
 add_library(mewjson_warnings INTERFACE)
 if(${CMAKE_C_COMPILER_ID} STREQUAL MSVC)
     target_compile_options(mewjson_warnings
-            INTERFACE /Wx /Wall)
+            INTERFACE /WX /Wall)
 else()
     target_compile_options(mewjson_warnings
             INTERFACE -Werror -Wall -Wextra -Wpedantic
