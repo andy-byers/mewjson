@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        build_type: [Release]
+        cc: [gcc, clang, cl]
+        include:
+          - os: windows-latest
+            cc: cl
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+        exclude:
+          - os: windows-latest
+            cc: gcc
+          - os: windows-latest
+            cc: clang
+          - os: ubuntu-latest
+            cc: cl
+    
+    env:
+      build_dir: "${{ github.workspace }}/build"
+      
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure
+      run: >
+        cmake -B ${{ env.build_dir }}
+        -DCMAKE_C_COMPILER=${{ matrix.cc }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -S ${{ github.workspace }}
+
+    - name: Build
+      run: cmake --build ${{ env.build_dir }} --config ${{ matrix.build_type }}
+
+    - name: Test
+      working-directory: ${{ env.build_dir }}
+      run: ctest --build-config ${{ matrix.build_type }}
