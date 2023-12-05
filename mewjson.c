@@ -17,7 +17,7 @@
 #define MEWJSON_STACK_SIZE 512
 #endif // MEWJSON_STACK_SIZE
 
-#define END_OF_INPUT '\xFF'
+#define END_OF_INPUT '\x00'
 #define TRUE (JsonBool)1
 #define FALSE (JsonBool)0
 
@@ -224,9 +224,9 @@ static void ungetChar(const char **ptr)
 static char skipWhitespace(const char **ptr)
 {
     char c;
-    do {
-        c = getChar(ptr);
-    } while (ISSPACE(c));
+    while (ISSPACE(c = peekChar(ptr))) {
+        getChar(ptr);
+    }
     return c;
 }
 
@@ -559,7 +559,10 @@ static enum Token scanToken(struct ParseState *s, const char **ptr)
 {
     // skipWhitespace(parser) returns the first non-whitespace character following the last
     // token we read.
-    switch (skipWhitespace(ptr)) {
+    if (skipWhitespace(ptr) == END_OF_INPUT) {
+        return kTokenEndOfInput;
+    }
+    switch (getChar(ptr)) {
         case '"':
             return scanString(s, ptr);
         case '-':
@@ -594,8 +597,6 @@ static enum Token scanToken(struct ParseState *s, const char **ptr)
             return kTokenEndObject;
         case ']':
             return kTokenEndArray;
-        case END_OF_INPUT:
-            return kTokenEndOfInput;
         default:
             s->status = kStatusSyntaxError;
             return kTokenError;
@@ -810,15 +811,19 @@ static enum Token parserAdvance(struct ParseState *s, const char **ptr)
     return kTokenError;
 }
 
-static int parserFinish(struct ParseState *s, enum State state, const char **ptr)
+static int parserFinish(struct ParseState *s, enum State state, JsonSize offset, JsonSize length)
 {
-    if (ISSPACE(peekChar(ptr))) {
-        skipWhitespace(ptr);
-        ungetChar(ptr);
+    s->offset = offset < length ? offset : length;
+    if (s->status != kStatusOk) {
+        return -1;
     }
     if (state == kStateStop) {
         s->status = kStatusStopped;
         return 0;
+    }
+    if (offset < length) {
+        s->status = kStatusSyntaxError;
+        return -1;
     }
     if (s->status != kStatusOk) {
         return -1;
@@ -839,8 +844,9 @@ static int parserFinish(struct ParseState *s, enum State state, const char **ptr
     return 0;
 }
 
-static int parserParse(struct ParseState *s, const char **ptr)
+static int parserParse(struct ParseState *s, const char **ptr, JsonSize length)
 {
+    const char *begin = *ptr;
     enum State state = kStateBegin;
     enum Token token;
     do {
@@ -848,18 +854,11 @@ static int parserParse(struct ParseState *s, const char **ptr)
         state = predictState(state, token);
         state = transitState(s, state);
     } while (state > kStateBegin);
-    return parserFinish(s, state, ptr);
-}
 
-static void parserFinalize(struct ParseState *s, JsonSize offset, JsonSize length)
-{
-    s->offset = offset < length ? offset : length;
-    if (s->status != kStatusOk) {
-        return;
-    }
-    if (offset < length) {
-        s->status = kStatusSyntaxError;
-    }
+    // Skip the rest of the whitespace. We need to determine if the parser has made it to the
+    // end of the buffer or not. If not, then there must be junk at the end of the input.
+    skipWhitespace(ptr);
+    return parserFinish(s, state, *ptr - begin, length);
 }
 
 // Input buffer gets padded with this number of bytes
@@ -893,8 +892,7 @@ enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser 
 
     // Parse the document.
     const char *ptr = text;
-    parserParse(&s, &ptr);
-    parserFinalize(&s, ptr - text, length);
+    parserParse(&s, &ptr, length);
 
     // Save the offset that the parser left off on and cleanup.
     parser->offset = s.offset;
