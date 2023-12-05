@@ -98,9 +98,9 @@ JsonBool jsonBoolean(const JsonValue *value);
 // General-purpose allocation routines used by the parser
 // User-provided allocators must return memory that is aligned to at least _Alignof(max_align_t).
 struct JsonAllocator {
-    void *(*malloc)(size_t);
-    void *(*realloc)(void *, size_t);
-    void (*free)(void *);
+    void *ctx;
+    void *(*malloc)(void *ctx, size_t size);
+    void (*free)(void *ctx, void *ptr, size_t size);
 };
 
 // JSON parser context
