@@ -960,11 +960,11 @@ static void runOnePassFailTest(const char *name, enum TestcaseType type)
 
 static void runExternalPassFailTests(void)
 {
-    for (JsonSize i = 0; i < COUNTOF(kYesTestNames); ++i) {
-        runOnePassFailTest(kYesTestNames[i], kTestcaseYes);
-    }
     for (JsonSize i = 0; i < COUNTOF(kNoTestNames); ++i) {
         runOnePassFailTest(kNoTestNames[i], kTestcaseNo);
+    }
+    for (JsonSize i = 0; i < COUNTOF(kYesTestNames); ++i) {
+        runOnePassFailTest(kYesTestNames[i], kTestcaseYes);
     }
 }
 
@@ -1233,15 +1233,21 @@ static void testcaseUtf8(void)
 
 static JsonBool multiDocEndContainer(void *ctx, JsonBool isObject)
 {
-    (void)ctx;
-    (void)isObject;
+    testEndContainer(ctx, isObject);
     return 0; // Stop on the first ']' or '}'
 }
 
 static void testcaseMultipleDocs(void)
 {
     testcaseInit("multiple_docs");
-    static const char kInput[] = "{\"a\":1} [true]\n{}\r\n[1,2,3]     {\"b\":1}";
+    static const int kExpectedTypes[] = {
+        kTypeObjectBegin, kTypeObjectEnd,   kTypeArrayBegin, kTypeArrayEnd,   kTypeObjectBegin,
+        kTypeString,      kTypeInteger,     kTypeObjectEnd,  kTypeArrayBegin, kTypeBoolean,
+        kTypeArrayEnd,    kTypeObjectBegin, kTypeObjectEnd,  kTypeArrayBegin, kTypeInteger,
+        kTypeInteger,     kTypeInteger,     kTypeArrayEnd,   kTypeArrayBegin, kTypeArrayEnd,
+        kTypeObjectBegin, kTypeString,      kTypeInteger,    kTypeObjectEnd,
+    };
+    static const char kInput[] = "{}[]{\"a\":1} [true]\n{}\r\n[1,2,3]     []\t{\"b\":1}";
     JsonSize length = SIZEOF(kInput) - 1;
     struct JsonParser parser;
     struct TestcaseContext ctx;
@@ -1255,12 +1261,15 @@ static void testcaseMultipleDocs(void)
         length -= parser.offset;
         ptr += parser.offset;
     }
+    for (JsonSize i = 0; i < ctx.length; ++i) {
+        CHECK(ctx.nodes[i].type == kExpectedTypes[i]);
+    }
 }
+
+static void testcaseEmbeddedNull(void) {}
 
 int main(void)
 {
-    testcaseMultipleDocs();
-
     puts("* * * running mewjson tests * * *");
 
     sanityCheckRealEquality();
@@ -1276,6 +1285,8 @@ int main(void)
     testcaseRealIdentity();
     testcaseLiteralIdentity();
     testcaseUtf8();
+    testcaseMultipleDocs();
+    testcaseEmbeddedNull();
     checkForLeaks();
 
     puts("* * * passed all testcases * * *");
