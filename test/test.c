@@ -1114,7 +1114,7 @@ static void testCheckLiteral(const char *input, JsonBool expectNull, JsonBool bo
 
 static void testcaseLiteralIdentity(void)
 {
-    testcaseInit("number_real");
+    testcaseInit("literal_identity");
     testCheckLiteral("null", 1, 0);
     testCheckLiteral("false", 0, 0);
     testCheckLiteral("true", 0, 1);
@@ -1135,6 +1135,7 @@ static void testCheckUtf8(const char *input, JsonBool expectOk)
 
 static void testcaseUtf8(void)
 {
+    testcaseInit("utf8");
     static const struct {
         const char *text;
         JsonBool isValid;
@@ -1230,8 +1231,36 @@ static void testcaseUtf8(void)
     }
 }
 
+static JsonBool multiDocEndContainer(void *ctx, JsonBool isObject)
+{
+    (void)ctx;
+    (void)isObject;
+    return 0; // Stop on the first ']' or '}'
+}
+
+static void testcaseMultipleDocs(void)
+{
+    testcaseInit("multiple_docs");
+    static const char kInput[] = "{\"a\":1} [true]\n{}\r\n[1,2,3]     {\"b\":1}";
+    JsonSize length = SIZEOF(kInput) - 1;
+    struct JsonParser parser;
+    struct TestcaseContext ctx;
+    testParserInit(&parser, &ctx);
+    parser.h.endContainer = multiDocEndContainer;
+
+    const char *ptr = kInput;
+    while (length > 0) {
+        enum JsonStatus s = jsonParse(ptr, length, &parser);
+        CHECK(s == kStatusStopped);
+        length -= parser.offset;
+        ptr += parser.offset;
+    }
+}
+
 int main(void)
 {
+    testcaseMultipleDocs();
+
     puts("* * * running mewjson tests * * *");
 
     sanityCheckRealEquality();

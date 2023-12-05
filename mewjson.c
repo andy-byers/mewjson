@@ -838,6 +838,7 @@ static int parserFinish(struct ParseState *s, enum State state, const char **ptr
 {
     if (ISSPACE(peekChar(ptr))) {
         skipWhitespace(ptr);
+        ungetChar(ptr);
     }
     if (state == kStateStop) {
         s->status = kStatusStopped;
