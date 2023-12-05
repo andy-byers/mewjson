@@ -20,11 +20,14 @@
 #define STR(x) XSTR(x)
 #define CAT(x, y) XSTR(x##y)
 
-static JsonSize sBytesUsed;
+struct TestAllocatorState {
+    JsonSize bytesUsed;
+    int oomCounter;
+} sState;
 
 void checkForLeaks(void)
 {
-    CHECK(sBytesUsed == 0);
+    CHECK(sState.bytesUsed == 0);
 }
 
 // Modified from P-Gn's answer to https://stackoverflow.com/questions/4915462.
@@ -40,59 +43,35 @@ JsonBool areRealsEqual(double x, double y)
     return diff < fmax(kTheta, kEpsilon * norm);
 }
 
-static int sOomCounter = -1;
-
-static void *testMalloc(size_t size)
+static void *testMalloc(void *ctx, size_t size)
 {
-    if (sOomCounter == 0) {
+    struct TestAllocatorState *state = ctx;
+    if (state->oomCounter == 0) {
         return NULL;
-    } else if (sOomCounter > 0) {
-        --sOomCounter;
+    } else if (state->oomCounter > 0) {
+        --state->oomCounter;
     }
-    JsonSize *ptr = malloc(sizeof(JsonSize) + size);
+    JsonSize *ptr = malloc(size);
     if (ptr) {
-        sBytesUsed += (JsonSize)size;
-        *ptr++ = (JsonSize)size;
+        state->bytesUsed += (JsonSize)size;
     }
     return ptr;
 }
 
-static void *testRealloc(void *ptr, size_t size)
-{
-    if (sOomCounter == 0) {
-        return NULL;
-    } else if (sOomCounter > 0) {
-        --sOomCounter;
-    }
-    JsonSize oldSize = 0;
-    JsonSize *hdr = ptr;
-    if (hdr) {
-        --hdr;
-        oldSize = hdr[0];
-    }
-    JsonSize *newPtr = realloc(hdr, sizeof(JsonSize) + size);
-    if (newPtr) {
-        sBytesUsed += (JsonSize)size - oldSize;
-        *newPtr++ = (JsonSize)size;
-    }
-    return newPtr;
-}
-
-static void testFree(void *ptr)
+static void testFree(void *ctx, void *ptr, size_t size)
 {
     if (ptr) {
-        JsonSize *hdr = ptr;
-        --hdr;
-        sBytesUsed -= hdr[0];
-        CHECK(sBytesUsed >= 0);
-        free(hdr);
+        struct TestAllocatorState *state = ctx;
+        state->bytesUsed -= (JsonSize)size;
+        CHECK(state->bytesUsed >= 0);
+        free(ptr);
     }
 }
 
 static struct JsonAllocator sAllocator = {
-    testMalloc,
-    testRealloc,
-    testFree,
+    .ctx = &sState,
+    .malloc = testMalloc,
+    .free = testFree,
 };
 
 // Tags to indicate which handler function to return 0 from
@@ -790,7 +769,9 @@ static void testcaseInit(const char *name)
 {
     puts(name);
     checkForLeaks();
-    sOomCounter = -1;
+    sState = (struct TestAllocatorState){
+        .oomCounter = -1,
+    };
 }
 
 static const char kOomExample[] =
@@ -828,7 +809,7 @@ static void testcaseOom(void)
 
     int failures = 0;
     for (;; ++failures) {
-        sOomCounter = failures;
+        sState.oomCounter = failures;
         const enum JsonStatus s = jsonParse(kOomExample, (JsonSize)strlen(kOomExample), &parser);
         if (s == kStatusOk) {
             break;
