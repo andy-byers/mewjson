@@ -25,9 +25,8 @@
 #define SIZEOF(x) (JsonSize)sizeof(x)
 #define COUNTOF(a) (SIZEOF(a) / SIZEOF(*(a)))
 
-#define JSON_MALLOC(a, size) (a).malloc((size_t)(size))
-#define JSON_REALLOC(a, ptr, size) (a).realloc(ptr, (size_t)(size))
-#define JSON_FREE(a, ptr) (a).free(ptr)
+#define JSON_MALLOC(a, size) (a).malloc((a).ctx, (size_t)(size))
+#define JSON_FREE(a, ptr, size) (a).free((a).ctx, ptr, (size_t)(size))
 
 JsonBool defaultAcceptKey(void *ctx, const char *key, JsonSize value)
 {
@@ -51,6 +50,20 @@ JsonBool defaultBeginOrEndContainer(void *ctx, JsonBool isObject)
     return TRUE;
 }
 
+static void *jsonMalloc(void *ctx, size_t size)
+{
+    UNUSED(ctx);
+    UNUSED(size);
+    return malloc(size);
+}
+
+static void jsonFree(void *ctx, void *ptr, size_t size)
+{
+    UNUSED(ctx);
+    UNUSED(size);
+    free(ptr);
+}
+
 void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct JsonAllocator *a)
 {
     static const struct JsonHandler kHandlerPrototype = {
@@ -60,9 +73,8 @@ void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct Jso
         .endContainer = defaultBeginOrEndContainer,
     };
     static const struct JsonAllocator kAllocatorPrototype = {
-        .malloc = malloc,
-        .realloc = realloc,
-        .free = free,
+        .malloc = jsonMalloc,
+        .free = jsonFree,
     };
     parser->h = h ? *h : kHandlerPrototype;
     parser->a = a ? *a : kAllocatorPrototype;
@@ -703,7 +715,7 @@ static int maybeGrowStack(struct ParseState *s)
         }
         memcpy(stack, s->stack, (size_t)s->depth);
         if (s->stack != s->small) {
-            JSON_FREE(*a, s->stack);
+            JSON_FREE(*a, s->stack, s->capacity);
         }
         s->stack = stack;
         s->capacity = cap;
@@ -911,9 +923,9 @@ enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser 
     parser->offset = s.offset;
     parser->status = s.status;
     if (s.stack != s.small) {
-        JSON_FREE(a, s.stack);
+        JSON_FREE(a, s.stack, s.capacity);
     }
-    JSON_FREE(a, text);
+    JSON_FREE(a, text, length + PADDING_LENGTH);
     return s.status;
 }
 
