@@ -342,6 +342,7 @@ static enum Token scanString(struct ParseState *s, const char **ptr)
     if (ISASCIIEND(c = (*ptr)[n])) {                                                               \
         body;                                                                                      \
         *ptr += (n);                                                                               \
+        out += (n);                                                                                \
         break;                                                                                     \
     }
 
@@ -368,6 +369,7 @@ handle_ascii:
         out[2] = (*ptr)[2];
         out[3] = (*ptr)[3];
         *ptr += 4;
+        out += 4;
     }
 #undef CHECK_ASCII
 
