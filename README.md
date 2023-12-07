@@ -2,16 +2,19 @@
 > Please don't use it for anything important!
 
 # mewjson
-a tiny JSON parser
+a tiny JSON library
 
 ## Requirements
 The library requires the following to compile:
 + CMake version 3.14 or later
 + C compiler with support for C11
 
+## Features
++ Uses a packed parse tree representation to save memory
+
 ## Caveats
-+ Only supports SAX-style (callback-based) parsing
-+ Parser uses dynamic memory (usually 1 allocation, about equal to the size of the input)
++ Only supports DOM-style (parse tree-based) parsing
++ Parser uses dynamic memory
 + Real number parsing is very slow (uses `strtod()`)
 
 ## API
@@ -44,3 +47,11 @@ if (s != kStatusOk) {
     abort();
 }
 ```
+
+## Credits
++ The awesome folks on [this r/C_Programming thread](https://www.reddit.com/r/C_Programming/comments/18aqehf/json_parser_project/), who were kind enough to review this project
++ Variable-length integer encoding/decoding functions were modified from LevelDB
++ Logic for decoding integers is from SQLite's JSON module
++ Idea to use a packed representation is from SQLite's JSONB module
++ State transition lookup table was inspired by rapidjson
++ Signed varint encoding is from the Go repo
