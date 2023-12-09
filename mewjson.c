@@ -41,7 +41,7 @@ _Static_assert(SIZEOF(double) == SIZEOF(uint64_t), "SIZEOF(double) must equal SI
 
 #define MAX_VARINT_SIZE 10
 
-JsonSize varintLengthU64(uint64_t v)
+static JsonSize varintLengthU64(uint64_t v)
 {
     JsonSize len = 1;
     while (v >= 128) {
@@ -51,9 +51,9 @@ JsonSize varintLengthU64(uint64_t v)
     return len;
 }
 
-uint8_t *encodeVarintU64(uint8_t *dst, uint64_t v)
+static uint8_t *encodeVarintU64(uint8_t *dst, uint64_t v)
 {
-    static const int kMsb = 0x80;
+    static const uint64_t kMsb = 0x80;
     while (v >= kMsb) {
         *dst++ = v | kMsb;
         v >>= 7;
@@ -62,7 +62,7 @@ uint8_t *encodeVarintU64(uint8_t *dst, uint64_t v)
     return dst;
 }
 
-const uint8_t *decodeVarintU64(const uint8_t *p, uint64_t *value)
+static const uint8_t *decodeVarintU64(const uint8_t *p, uint64_t *value)
 {
     uint64_t result = 0;
     for (uint32_t shift = 0; shift <= 63; shift += 7) {
@@ -72,26 +72,26 @@ const uint8_t *decodeVarintU64(const uint8_t *p, uint64_t *value)
             result |= ((byte & 127) << shift);
         } else {
             result |= (byte << shift);
-            *value = result;
-            return p;
+            break;
         }
     }
-    return NULL;
+    *value = result;
+    return p;
 }
 
-JsonSize varintLengthI64(int64_t v)
+static JsonSize varintLengthI64(int64_t v)
 {
     uint64_t u = (uint64_t)v << 1;
     return varintLengthU64(v < 0 ? ~u : u);
 }
 
-uint8_t *encodeVarintI64(uint8_t *dst, int64_t v)
+static uint8_t *encodeVarintI64(uint8_t *dst, int64_t v)
 {
     uint64_t u = (uint64_t)v << 1;
     return encodeVarintU64(dst, v < 0 ? ~u : u);
 }
 
-const uint8_t *decodeVarintI64(const uint8_t *p, int64_t *value)
+static const uint8_t *decodeVarintI64(const uint8_t *p, int64_t *value)
 {
     uint64_t u;
     p = decodeVarintU64(p, &u);

@@ -1,5 +1,6 @@
 #include "mewjson.h"
 #include <float.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1040,7 +1041,7 @@ static void testcaseNodeSizes(void)
     }
     for (JsonSize i = 0; i < COUNTOF(kNames); ++i) {
         const JsonSize sizeInBytes = values[i + 1] - values[i];
-        printf("    %s  %ld\n", kNames[i], sizeInBytes);
+        printf("    %s  %" PRId64 "\n", kNames[i], (int64_t)sizeInBytes);
     }
     jsonDestroyDocument(doc);
 }
