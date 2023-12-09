@@ -44,5 +44,3 @@ if(MEWJSON_BuildTests)
     enable_testing()
     add_subdirectory(test)
 endif()
-
-add_subdirectory(perf)# TODO: remove
