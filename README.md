@@ -24,7 +24,7 @@ mewjson aims to provide a small, convenient API for parsing and validating JSON 
 
 ### Initialize a parser
 The second parameter to `jsonParserInit()` is a pointer to `struct JsonAllocator`.
-If nonnull, the provided allocation functions are used to get memory for the parser. 
+If nonnull, the provided allocation functions are used to get memory for the parser.
 Otherwise, the standard C allocation routines `malloc`, `realloc`, and `free` are used.
 ```C
 struct JsonParser parser;
