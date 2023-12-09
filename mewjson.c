@@ -1261,9 +1261,6 @@ json_simple_escape:
     appendChar(w, '"');
 }
 
-static const char kContainerBegin[] = "[{";
-static const char kContainerEnd[] = "]}";
-
 static void writeScalar(struct Writer *w, struct JsonCursor *c)
 {
     const JsonValue *value = jsonCursorValue(c);
@@ -1388,7 +1385,7 @@ JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
         if (ISCONTAINER(jsonType(value))) {
             // Value is a nested container.
             if (!isContainerEmpty(value)) {
-                appendChar(&w, kContainerBegin[isObjectNode(value)]);
+                appendChar(&w, "[{"[isObjectNode(value)]);
                 parent = value;
                 cursorNext(&c);
                 continue;
@@ -1406,7 +1403,7 @@ next_iteration:
         if (c.data - (char *)parent < sizeOfSubTree(parent)) {
             appendChar(&w, ',');
         } else {
-            appendChar(&w, kContainerEnd[isObjectNode(parent)]);
+            appendChar(&w, "]}"[isObjectNode(parent)]);
             // Back out of nested containers. This block doesn't move the cursor at all, it just
             // adjusts the parent pointer until a container is found with children that still need
             // to be written.
