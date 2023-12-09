@@ -16,14 +16,16 @@ endif()
 option(MEWJSON_BuildFuzzers "Build the fuzz targets" Off)
 option(MEWJSON_BuildTests "Build the tests" ${MAIN_PROJECT})
 
-add_library(mewjson_warnings INTERFACE)
+add_library(mewjson_context INTERFACE)
 if(${CMAKE_C_COMPILER_ID} STREQUAL MSVC)
-    target_compile_options(mewjson_warnings
+    target_compile_options(mewjson_context
             INTERFACE /WX /W2)
 else()
-    target_compile_options(mewjson_warnings
+    target_compile_options(mewjson_context
             INTERFACE -Werror -Wall -Wextra -Wpedantic
                       -Wsign-conversion -Wformat=2)
+    target_link_libraries(mewjson_context
+            INTERFACE m)
 endif()
 
 add_library(mewjson STATIC)
@@ -33,7 +35,7 @@ target_sources(mewjson
 target_include_directories(mewjson
         PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(mewjson
-        PRIVATE mewjson_warnings)
+        PRIVATE mewjson_context)
 
 if(MEWJSON_BuildFuzzers)
     add_subdirectory(fuzz)

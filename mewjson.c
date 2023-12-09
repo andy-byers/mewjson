@@ -3,6 +3,9 @@
 
 #include "mewjson.h"
 #include <assert.h>
+#include <float.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,11 +14,12 @@
 #define MEWJSON_MAX_DEPTH 10000
 #endif // MEWJSON_MAX_DEPTH
 
-// Number of bytes of stack space to use for tracking nested containers before
-// resorting to a heap allocation
-#ifndef MEWJSON_STACK_SIZE
-#define MEWJSON_STACK_SIZE 512
-#endif // MEWJSON_STACK_SIZE
+// Number of nested containers to push onto an internal stack before resorting to a heap
+// allocation
+// Each stack element is the size of a pointer.
+#ifndef MEWJSON_STACK_DEPTH
+#define MEWJSON_STACK_DEPTH 512
+#endif // MEWJSON_STACK_DEPTH
 
 #define END_OF_INPUT '\x00'
 #define TRUE (JsonBool)1
@@ -25,29 +29,75 @@
 #define SIZEOF(x) (JsonSize)sizeof(x)
 #define COUNTOF(a) (SIZEOF(a) / SIZEOF(*(a)))
 
-#define JSON_MALLOC(a, size) (a).malloc((a).ctx, (size_t)(size))
-#define JSON_FREE(a, ptr, size) (a).free((a).ctx, ptr, (size_t)(size))
+// Preconditions that must be met for the binary encoding to work properly
+_Static_assert(SIZEOF(double) == SIZEOF(uint64_t), "SIZEOF(double) must equal SIZEOF(uint64_t)");
 
-JsonBool defaultAcceptKey(void *ctx, const char *key, JsonSize value)
+#define JSON_MALLOC(a, n) (a).malloc((a).ctx, (size_t)(n))
+#define JSON_REALLOC(a, p, n0, n1) (a).realloc((a).ctx, p, (size_t)(n0), (size_t)(n1))
+#define JSON_FREE(a, p, n) (a).free((a).ctx, p, (size_t)(n))
+
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+
+#define MAX_VARINT_SIZE 10
+
+static JsonSize varintLengthU64(uint64_t v)
 {
-    UNUSED(ctx);
-    UNUSED(key);
-    UNUSED(value);
-    return TRUE;
+    JsonSize len = 1;
+    while (v >= 128) {
+        v >>= 7;
+        len++;
+    }
+    return len;
 }
 
-JsonBool defaultAcceptValue(void *ctx, const JsonValue *value)
+static uint8_t *encodeVarintU64(uint8_t *dst, uint64_t v)
 {
-    UNUSED(ctx);
-    UNUSED(value);
-    return TRUE;
+    static const uint64_t kMsb = 0x80;
+    while (v >= kMsb) {
+        *dst++ = v | kMsb;
+        v >>= 7;
+    }
+    *dst++ = (uint8_t)v;
+    return dst;
 }
 
-JsonBool defaultBeginOrEndContainer(void *ctx, JsonBool isObject)
+static const uint8_t *decodeVarintU64(const uint8_t *p, uint64_t *value)
 {
-    UNUSED(ctx);
-    UNUSED(isObject);
-    return TRUE;
+    uint64_t result = 0;
+    for (uint32_t shift = 0; shift <= 63; shift += 7) {
+        uint64_t byte = *p;
+        p++;
+        if (byte & 128) {
+            result |= ((byte & 127) << shift);
+        } else {
+            result |= (byte << shift);
+            break;
+        }
+    }
+    *value = result;
+    return p;
+}
+
+static JsonSize varintLengthI64(int64_t v)
+{
+    uint64_t u = (uint64_t)v << 1;
+    return varintLengthU64(v < 0 ? ~u : u);
+}
+
+static uint8_t *encodeVarintI64(uint8_t *dst, int64_t v)
+{
+    uint64_t u = (uint64_t)v << 1;
+    return encodeVarintU64(dst, v < 0 ? ~u : u);
+}
+
+static const uint8_t *decodeVarintI64(const uint8_t *p, int64_t *value)
+{
+    uint64_t u;
+    p = decodeVarintU64(p, &u);
+    int64_t v = (int64_t)(u >> 1);
+    *value = u & 1 ? ~v : v;
+    return p;
 }
 
 static void *jsonMalloc(void *ctx, size_t size)
@@ -57,6 +107,13 @@ static void *jsonMalloc(void *ctx, size_t size)
     return malloc(size);
 }
 
+static void *jsonRealloc(void *ctx, void *ptr, size_t oldSize, size_t newSize)
+{
+    UNUSED(ctx);
+    UNUSED(oldSize);
+    return realloc(ptr, newSize);
+}
+
 static void jsonFree(void *ctx, void *ptr, size_t size)
 {
     UNUSED(ctx);
@@ -64,30 +121,30 @@ static void jsonFree(void *ctx, void *ptr, size_t size)
     free(ptr);
 }
 
-void jsonParserInit(struct JsonParser *parser, struct JsonHandler *h, struct JsonAllocator *a)
+void jsonParserInit(struct JsonParser *parser, struct JsonAllocator *a)
 {
-    static const struct JsonHandler kHandlerPrototype = {
-        .acceptKey = defaultAcceptKey,
-        .acceptValue = defaultAcceptValue,
-        .beginContainer = defaultBeginOrEndContainer,
-        .endContainer = defaultBeginOrEndContainer,
-    };
     static const struct JsonAllocator kAllocatorPrototype = {
         .malloc = jsonMalloc,
+        .realloc = jsonRealloc,
         .free = jsonFree,
     };
-    parser->h = h ? *h : kHandlerPrototype;
     parser->a = a ? *a : kAllocatorPrototype;
 }
 
-struct JsonValue {
-    // Type of JSON value
-    enum JsonType type;
+enum {
+    kTypeWidth = 4,
+    kTypeMask = 0x0F,
+    kBooleanMask = 0x80,
+};
 
-    // Number of bytes in a string, 0 for all other types
+struct UnpackNode {
+    // Type of JSON value
+    int type;
+
+    // Number of bytes occupied by the node and all of its children, if any
     JsonSize size;
 
-    // Decoded data associated with the value
+    // Decoded data associated with the node
     union {
         const char *string;
         int64_t integer;
@@ -96,27 +153,206 @@ struct JsonValue {
     };
 };
 
-// State variables used during a parse
-struct ParseState {
-    // Copies of the handler and allocator held by the JsonParser instance
-    struct JsonHandler h;
+#define ISCONTAINER(t) ((t) >= kTypeObject)
+
+static uint8_t *containerDecodeSize(const JsonValue *value, JsonSize *size)
+{
+    assert(ISCONTAINER(jsonType(value)));
+    uint8_t *ptr = (uint8_t *)value + 1;
+
+    int64_t i;
+    decodeVarintI64(ptr, &i);
+    *size = i;
+    return ptr + (ptr[-1] >> kTypeWidth);
+}
+
+static uint8_t *containerDecodeUp(const JsonValue *value, JsonSize *up)
+{
+    assert(ISCONTAINER(jsonType(value)));
+    uint8_t *ptr = (uint8_t *)value + 1;
+    ptr += ptr[-1] >> kTypeWidth;
+
+    uint64_t u;
+    ptr = (uint8_t *)decodeVarintU64(ptr, &u);
+    *up = (JsonSize)u;
+    return ptr;
+}
+
+static JsonSize sizeOfContainer(const JsonValue *value)
+{
+    assert(ISCONTAINER(jsonType(value)));
+    uint8_t *ptr = (uint8_t *)value + 1;
+    ptr += ptr[-1] >> kTypeWidth;
+    while (*ptr++ & 0x80) {
+        // Skip varint
+    }
+    return ptr - (uint8_t *)value;
+}
+
+static JsonSize isContainerEmpty(const JsonValue *value)
+{
+    assert(ISCONTAINER(jsonType(value)));
+    JsonSize size;
+    containerDecodeSize(value, &size);
+    return size == sizeOfContainer(value);
+}
+
+static JsonSize sizeOfScalar(const JsonValue *value)
+{
+    const uint8_t *ptr = (uint8_t *)value;
+    int type = *ptr++ & kTypeMask;
+    assert(!ISCONTAINER(type));
+    switch (type) {
+        case kTypeString: {
+            int64_t length;
+            ptr = decodeVarintI64(ptr, &length);
+            ptr += length;
+            break;
+        }
+        case kTypeReal:
+        case kTypeInteger:
+            while (*ptr++ & 0x80) {
+                // Skip varint
+            }
+        default: // kTypeBoolean || kTypeNull
+            break;
+    }
+    return ptr - (uint8_t *)value;
+}
+
+static JsonSize sizeOfSubTree(const JsonValue *value)
+{
+    if (ISCONTAINER(jsonType(value))) {
+        JsonSize size;
+        containerDecodeSize(value, &size);
+        return size;
+    }
+    return sizeOfScalar(value);
+}
+
+static JsonBool isObjectNode(const JsonValue *v)
+{
+    return jsonType(v) == kTypeObject;
+}
+
+// Represents a JSON parse tree
+struct JsonDocument {
     struct JsonAllocator a;
 
-    JsonValue value;
+    // Buffer of packed JSON value nodes
+    char *buffer;
+    JsonSize length;
+    JsonSize capacity;
+};
+
+// State variables used during a parse
+struct ParseState {
+    struct JsonAllocator a;
+    JsonDocument *doc;
+    const char *end;
+
+    JsonSize depth;
     JsonSize offset;
+    JsonSize upIndex;
 
     // Status code pertaining to the parse. Value is kStatusOk on success, kStatusStopped if
     // the parser was stopped, and some other value on failure.
     enum JsonStatus status;
-
-    // Stack of nested container types.
-    uint8_t *stack;
-    JsonSize depth;
-    JsonSize capacity;
-
-    // Array used as backing for the stack until it gets too large.
-    uint8_t small[MEWJSON_STACK_SIZE];
 };
+
+static uint8_t *docWriteNode(struct ParseState *s, int type, JsonSize fixedPayload)
+{
+    JsonDocument *doc = s->doc;
+    static const JsonSize kExtraSize = 1 + MAX_VARINT_SIZE;
+    // Determine the largest amount of memory the next node could possibly need.
+    const JsonSize maxLength = doc->length + fixedPayload + kExtraSize;
+    if (maxLength > doc->capacity) {
+        JsonSize cap = 4;
+        while (cap < maxLength) {
+            cap *= 2;
+        }
+        // Resize the buffer to fit cap bytes.
+        char *ptr = JSON_REALLOC(s->doc->a, doc->buffer, doc->capacity, cap);
+        if (!ptr) {
+            s->status = kStatusNoMemory;
+            return NULL;
+        }
+        doc->buffer = ptr;
+        doc->capacity = cap;
+    }
+    uint8_t *ptr = (uint8_t *)&doc->buffer[doc->length];
+    // Account for the type and fixed payload.
+    doc->length += fixedPayload + 1;
+    *ptr++ = (uint8_t)type;
+    return ptr;
+}
+
+static void docAppendContainer(struct ParseState *s, JsonBool isObject, JsonSize up,
+                               JsonSize maxText)
+{
+    assert(up >= 0);
+    // maxHdr is the maximum number of bytes needed to store the number of bytes contained in a
+    // container node. This is a bit wasteful for most containers, but it prevents us from having
+    // to shift elements around or look ahead for the end of a container before writing its header.
+    // The number passed to varintLengthI64() is the maximum number of bytes that the root container
+    // node can contain, given the text length. Pretend that the root is an array filled with real
+    // numbers, all equal to 1.0. The real number 1.0 happens to encode to a 10-byte varint, with
+    // 1 byte required to hold the type. This is the worst possible case.
+    const JsonSize maxHdr = varintLengthI64((-2 /* [] */ + maxText + 3 /* round up */) / 4 * 11);
+    uint8_t *ptr = docWriteNode(s, isObject ? kTypeObject : kTypeArray, maxHdr);
+    if (ptr) {
+        JsonDocument *doc = s->doc;
+        // Indicate how many bytes are allotted to the size.
+        ptr[-1] |= maxHdr << kTypeWidth;
+        // Encode the back reference.
+        ptr += maxHdr;
+        uint8_t *end = encodeVarintU64(ptr, (uint64_t)up);
+        doc->length += end - ptr; // Just the varint size
+    }
+}
+
+static void docAppendString(struct ParseState *s, const char *string, JsonSize length)
+{
+    uint8_t *ptr = docWriteNode(s, kTypeString, length);
+    if (ptr) {
+        uint8_t *end = encodeVarintI64(ptr, length);
+        memcpy(end, string, (size_t)length);
+        s->doc->length += end - ptr;
+    }
+}
+
+static void docAppendInteger(struct ParseState *s, int64_t i)
+{
+    uint8_t *ptr = docWriteNode(s, kTypeInteger, 0);
+    if (ptr) {
+        uint8_t *end = encodeVarintI64(ptr, i);
+        s->doc->length += end - ptr;
+    }
+}
+
+static void docAppendReal(struct ParseState *s, double r)
+{
+    uint8_t *ptr = docWriteNode(s, kTypeReal, 0);
+    if (ptr) {
+        uint64_t u;
+        memcpy(&u, &r, sizeof(r));
+        uint8_t *end = encodeVarintU64(ptr, u);
+        s->doc->length += end - ptr;
+    }
+}
+
+static void docAppendBoolean(struct ParseState *s, JsonBool b)
+{
+    uint8_t *ptr = docWriteNode(s, kTypeBoolean, 0);
+    if (ptr && b) {
+        ptr[-1] |= kBooleanMask;
+    }
+}
+
+static void docAppendNull(struct ParseState *s)
+{
+    docWriteNode(s, kTypeNull, 0);
+}
 
 // Constants related to the character class lookup table
 enum {
@@ -250,7 +486,7 @@ static enum Token scanNull(struct ParseState *s, const char **ptr)
     if (getChar(ptr) == 'u' && //
         getChar(ptr) == 'l' && //
         getChar(ptr) == 'l') { //
-        s->value = (JsonValue){.type = kTypeNull};
+        docAppendNull(s);
         return kTokenValue;
     }
     s->status = kStatusLiteralInvalid;
@@ -262,7 +498,7 @@ static enum Token scanTrue(struct ParseState *s, const char **ptr)
     if (getChar(ptr) == 'r' && //
         getChar(ptr) == 'u' && //
         getChar(ptr) == 'e') { //
-        s->value = (JsonValue){.type = kTypeBoolean, .boolean = 1};
+        docAppendBoolean(s, 1);
         return kTokenValue;
     }
     s->status = kStatusLiteralInvalid;
@@ -275,7 +511,7 @@ static enum Token scanFalse(struct ParseState *s, const char **ptr)
         getChar(ptr) == 'l' && //
         getChar(ptr) == 's' && //
         getChar(ptr) == 'e') { //
-        s->value = (JsonValue){.type = kTypeBoolean, .boolean = 0};
+        docAppendBoolean(s, 0);
         return kTokenValue;
     }
     s->status = kStatusLiteralInvalid;
@@ -451,11 +687,7 @@ handle_ascii:
         }
     } else if (c == '"') {
         // Closing double quote finishes the string.
-        s->value = (JsonValue){
-            .type = kTypeString,
-            .size = out - begin,
-            .string = begin,
-        };
+        docAppendString(s, begin, out - begin);
         ++*ptr;
         return kTokenString;
     } else if (ISNONASCII(c)) {
@@ -518,7 +750,7 @@ static enum Token scanReal(struct ParseState *s, const char **ptr, JsonBool isNe
     // Input has been padded with at least 1 byte that strtod() will not recognize as being part
     // of a real number. Otherwise, strtod() might continue reading past the end of the buffer.
     const double real = strtod(begin, NULL);
-    s->value = (JsonValue){.type = kTypeReal, .real = real};
+    docAppendReal(s, real);
     return kTokenValue;
 }
 
@@ -557,7 +789,7 @@ static enum Token scanNumber(struct ParseState *s, const char **ptr, JsonBool is
                 // If the number isn't exactly INT64_MIN, then it will overflow and must be
                 // parsed as a real.
                 if (isNegative && !ISNUMERIC(peekChar(ptr))) {
-                    s->value = (JsonValue){.type = kTypeInteger, .integer = INT64_MIN};
+                    docAppendInteger(s, INT64_MIN);
                     return kTokenValue;
                 }
                 goto call_scan_real;
@@ -569,7 +801,7 @@ static enum Token scanNumber(struct ParseState *s, const char **ptr, JsonBool is
     if (!ISFPCHAR(peekChar(ptr))) {
         assert(value != INT64_MIN);
         value = isNegative ? -value : value;
-        s->value = (JsonValue){.type = kTypeInteger, .integer = value};
+        docAppendInteger(s, value);
         return kTokenValue;
     }
 
@@ -698,100 +930,55 @@ static enum State predictState(enum State src, enum Token token)
 }
 
 MEWJSON_NODISCARD
-static int maybeGrowStack(struct ParseState *s)
+static int parserBeginContainer(struct ParseState *s, JsonSize maxText, JsonBool isObject)
 {
-    struct JsonAllocator *a = &s->a;
-    if (s->depth >= s->capacity) {
-        if (s->capacity == 0) {
-            s->capacity = MEWJSON_STACK_SIZE;
-            s->stack = s->small;
-            return 0;
-        }
-        JsonSize cap = 4;
-        while (cap <= s->depth) {
-            cap *= 2;
-        }
-        uint8_t *stack = JSON_MALLOC(*a, cap);
-        if (!stack) {
-            s->status = kStatusNoMemory;
-            return -1;
-        }
-        memcpy(stack, s->stack, (size_t)s->depth);
-        if (s->stack != s->small) {
-            JSON_FREE(*a, s->stack, s->capacity);
-        }
-        s->stack = stack;
-        s->capacity = cap;
-    }
-    return 0;
-}
-
-MEWJSON_NODISCARD
-static int parserBeginContainer(struct ParseState *s, JsonBool isObject)
-{
-    if (s->depth >= MEWJSON_MAX_DEPTH) {
+    ++s->depth;
+    if (s->depth > MEWJSON_MAX_DEPTH) {
         s->status = kStatusExceededMaxDepth;
         return -1;
     }
-    if (maybeGrowStack(s)) {
-        return -1;
-    }
-    s->stack[s->depth] = isObject;
-    ++s->depth;
+    const JsonSize up = s->upIndex;
+    s->upIndex = s->doc->length;
+    docAppendContainer(s, isObject, s->doc->length - up, maxText);
     return 0;
 }
 
 MEWJSON_NODISCARD
 static enum State parserEndContainer(struct ParseState *s)
 {
-    struct JsonHandler *h = &s->h;
     // This precondition is ensured by the state transition table in predictState(). This
     // function will never be called unless parserBeginContainer() was called at some point.
     assert(s->depth > 0);
+    JsonDocument *doc = s->doc;
     --s->depth;
-    if (!h->endContainer(h->ctx, s->stack[s->depth])) {
-        return kStateStop;
-    }
+
+    // Write the container size in bytes right after the type.
+    uint8_t *hdr = (uint8_t *)&doc->buffer[s->upIndex + 1];
+    const JsonSize maxHdr = hdr[-1] >> kTypeWidth;
+    encodeVarintI64(hdr, doc->length - s->upIndex);
+    hdr += maxHdr;
+
+    uint64_t up;
+    decodeVarintU64(hdr, &up);
+    s->upIndex -= (JsonSize)up;
+
     if (s->depth > 0) {
+        hdr = (uint8_t *)&doc->buffer[s->upIndex];
         // Pretend like the parser just finished reading an object member value or an array
         // element. Essentially, we are considering the whole object or array that we just
         // left to be a single value, rather than a compound structure. We have to check
         // the grandparent, because the kOE token has not been accepted yet (acceptToken()
         // below). The parser control is technically still inside the object or array
         // presently being closed.
-        return s->stack[s->depth - 1] ? kO2 : kA1;
+        return (hdr[0] & kTypeMask) == kTypeObject ? kO2 : kA1;
     }
     // Just closed the root-level structure, so we must be finished. It is an error
     // otherwise, since RFC 8259 only allows a singular root.
     return kStateEnd;
 }
 
-static enum State parserAcceptKey(struct ParseState *s)
-{
-    struct JsonHandler *h = &s->h;
-    JsonValue *v = &s->value;
-    const JsonBool rc = h->acceptKey(h->ctx, v->string, v->size);
-    return rc ? kO1 : kStateStop;
-}
-
-static enum State parserAcceptValue(struct ParseState *s, enum State dst)
-{
-    struct JsonHandler *h = &s->h;
-    JsonValue *value = &s->value;
-    JsonBool rc;
-    switch (dst) {
-        case kOB:
-        case kAB:
-            rc = h->beginContainer(h->ctx, dst == kOB);
-            break;
-        default:
-            rc = h->acceptValue(h->ctx, value);
-    }
-    return rc ? dst : kStateStop;
-}
-
 // Transition into the next state
-static enum State transitState(struct ParseState *s, enum State dst)
+static enum State transitState(struct ParseState *s, enum State dst, const char *ptr)
 {
     // `dst` is the next state as predicted by predictState(), upon reading token `token`.
     // We need to make sure that the destination state is not a transient state (either
@@ -803,30 +990,28 @@ static enum State transitState(struct ParseState *s, enum State dst)
     // respectively, so basically, we are just treating the while object or array as a child
     // member/element in its parent object/array.
     switch (dst) {
-        case kO1:
-            // Indicate that the current node is an object member key.
-            return parserAcceptKey(s);
         case kOE:
         case kAE:
             // Leaving a nested container. Correct the state based on the type of container that
             // the parser control has returned into.
             return parserEndContainer(s);
+        case kO1:
         case kV1:
         case kA1:
         case kO2:
-            // Found a JSON value.
+            // Found a JSON key or value.
             break;
         case kOB:
         case kAB:
             // Entered an object or array.
-            if (parserBeginContainer(s, dst == kOB)) {
+            if (parserBeginContainer(s, s->end - ptr, dst == kOB)) {
                 return kStateError;
             }
             break;
         default:
-            return dst;
+            break;
     }
-    return parserAcceptValue(s, dst);
+    return dst;
 }
 
 static enum Token parserAdvance(struct ParseState *s, const char **ptr)
@@ -878,7 +1063,7 @@ static int parserParse(struct ParseState *s, const char **ptr, JsonSize length)
     do {
         token = parserAdvance(s, ptr);
         state = predictState(state, token);
-        state = transitState(s, state);
+        state = transitState(s, state, *ptr);
     } while (state > kStateBegin);
 
     // Skip the rest of the whitespace. We need to determine if the parser has made it to the
@@ -887,18 +1072,31 @@ static int parserParse(struct ParseState *s, const char **ptr, JsonSize length)
     return parserFinish(s, state, *ptr - begin, length);
 }
 
+MEWJSON_NODISCARD
+JsonDocument *createDocAndBuffer(struct JsonAllocator *a, JsonSize length, char **pBuf)
+{
+    JsonDocument *doc = JSON_MALLOC(*a, SIZEOF(*doc));
+    char *buf = JSON_MALLOC(*a, length);
+    if (!doc || !buf) {
+        JSON_FREE(*a, doc, SIZEOF(*doc));
+        JSON_FREE(*a, buf, length);
+        return NULL;
+    }
+    *pBuf = buf;
+    return doc;
+}
+
 // Input buffer gets padded with this number of bytes
 #define PADDING_LENGTH 4
 
 MEWJSON_NODISCARD
-enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser *parser)
+JsonDocument *jsonParse(const char *input, JsonSize length, struct JsonParser *parser)
 {
-    struct JsonHandler h = parser->h;
     struct JsonAllocator a = parser->a;
-    struct ParseState s = {.h = h, .a = a};
     parser->offset = -1;
 
-    // Allocate a padded buffer to hold the input text. This serves several purposes:
+    // Allocate a padded buffer at the end of the document object to hold the input text. This
+    // serves several purposes:
     // 1. Allows scanReal() to call strtod() directly on the input buffer, even if the real number
     //    being parsed is adjacent to the end of the buffer (original buffer is not necessarily
     //    null-terminated).
@@ -909,57 +1107,425 @@ enum JsonStatus jsonParse(const char *input, JsonSize length, struct JsonParser 
     //    kTokenEndOfInput token when we encounter an EOF byte. Of course, we also need to check to
     //    make sure we have reached the end of the buffer to handle embedded EOFs, but that happens
     //    just once, at the end.
-    char *text = JSON_MALLOC(a, length + PADDING_LENGTH);
-    if (!text) {
-        return kStatusNoMemory;
+    char *text;
+    const JsonSize paddedLen = length + PADDING_LENGTH;
+    JsonDocument *doc = createDocAndBuffer(&a, paddedLen, &text);
+    if (!doc) {
+        parser->status = kStatusNoMemory;
+        return NULL;
     }
+    struct ParseState s = {.doc = doc, .end = text + length};
+    *doc = (JsonDocument){.a = a};
+
     memcpy(text, input, (size_t)length);
     memset(text + length, END_OF_INPUT, PADDING_LENGTH);
 
     // Parse the document.
     const char *ptr = text;
     parserParse(&s, &ptr, length);
-
-    // Save the offset that the parser left off on and cleanup.
+    if (s.status != kStatusOk) {
+        jsonDestroyDocument(doc);
+        doc = NULL;
+    }
     parser->offset = s.offset;
     parser->status = s.status;
-    if (s.stack != s.small) {
-        JSON_FREE(a, s.stack, s.capacity);
+    JSON_FREE(a, text, paddedLen);
+    return doc;
+}
+
+MEWJSON_NODISCARD
+JsonDocument *jsonCloneDocument(JsonDocument *doc)
+{
+    char *buffer;
+    const JsonSize length = doc->length;
+    JsonDocument *doc2 = createDocAndBuffer(&doc->a, length, &buffer);
+    if (doc2) {
+        *doc2 = *doc;
+        memcpy(buffer, doc->buffer, (size_t)length);
+        doc2->capacity = length;
+        doc2->buffer = buffer;
     }
-    JSON_FREE(a, text, length + PADDING_LENGTH);
-    return s.status;
+    return doc2;
+}
+
+struct Writer {
+    char *ptr;
+    JsonSize len;
+    JsonSize acc;
+};
+
+static void appendChar(struct Writer *w, char c)
+{
+    ++w->acc;
+    if (w->len > 0) {
+        w->ptr[0] = c;
+        ++w->ptr;
+        --w->len;
+    }
+}
+
+static void appendString(struct Writer *w, const char *str, JsonSize len)
+{
+    w->acc += len;
+    if (len > 0 && len <= w->len) {
+        memcpy(w->ptr, str, (size_t)len);
+        w->ptr += len;
+        w->len -= len;
+    }
+}
+
+static void appendFiniteReal(struct Writer *w, double v)
+{
+    assert(isfinite(v));
+
+    char buf[32];
+    static const int kMaxDigits = DBL_DECIMAL_DIG;
+    JsonSize len = snprintf(buf, COUNTOF(buf), "%.*g", kMaxDigits, v);
+    // Make sure the printed number contains some indication that it is a real number rather than
+    // an integer. This step is very important: otherwise, we get strange problems, like "-0.0"
+    // being written as "-0", which is stored as the integer 0. Tests that attempt to roundtrip
+    // "-0.0", or any other real that rounds to it, will fail. Also converts ',' to '.'  (some
+    // locales use ',' as their decimal point, but RFC 8259 specifies '.').
+    JsonBool foundFpChar = 0;
+    for (JsonSize i = 0; i < len; i++) {
+        if (buf[i] == ',') {
+            buf[i] = '.';
+        }
+        if (ISFPCHAR(buf[i])) {
+            foundFpChar = 1;
+        }
+    }
+    if (!foundFpChar) {
+        buf[len++] = '.';
+        buf[len++] = '0';
+    }
+    appendString(w, buf, len);
+}
+
+// NOTE: This function is a bit faster than using snprintf(), and has the added benefit of not
+//       requiring inclusion of inttypes.h to get the proper format specifier ("%" PRId64).
+static void appendInteger(struct Writer *w, int64_t integer)
+{
+    // This buffer should have a single extra byte in the worst case.
+    char buffer[32];
+    const JsonBool negative = integer < 0;
+    char *end = buffer + COUNTOF(buffer);
+    char *ptr = end - 1;
+    // Don't call llabs(INT64_MIN). The result is undefined on 2s complement systems.
+    uint64_t u = integer == INT64_MIN ? (1ULL << 63) : (uint64_t)llabs(integer);
+    do {
+        *ptr-- = (char)(u % 10 + '0');
+        u /= 10;
+    } while (u);
+    if (negative) {
+        *ptr = '-';
+    } else {
+        ++ptr;
+    }
+    appendString(w, ptr, (JsonSize)(end - ptr));
+}
+
+// Modified from SQLite (src/json.c).
+static void appendEscapedString(struct Writer *w, const char *str, JsonSize len)
+{
+    appendChar(w, '"');
+    for (JsonSize i = 0; i < len; i++) {
+        uint8_t c = ((uint8_t *)str)[i];
+        if (c == '"' || c == '\\') {
+json_simple_escape:
+            appendChar(w, '\\');
+        } else if (c <= 0x1F) {
+            static const char kSpecialChars[] = {
+                0, 0, 0, 0, 0, 0, 0, 0, 'b', 't', 'n', 0, 'f', 'r', 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0,   0,   0,   0, 0,   0,   0, 0,
+            };
+            assert(COUNTOF(kSpecialChars) == 32);
+            assert(kSpecialChars['\b'] == 'b');
+            assert(kSpecialChars['\f'] == 'f');
+            assert(kSpecialChars['\n'] == 'n');
+            assert(kSpecialChars['\r'] == 'r');
+            assert(kSpecialChars['\t'] == 't');
+            if (kSpecialChars[c]) {
+                c = (uint8_t)kSpecialChars[c];
+                goto json_simple_escape;
+            }
+            appendChar(w, '\\');
+            appendChar(w, 'u');
+            appendChar(w, '0');
+            appendChar(w, '0');
+            appendChar(w, (char)('0' + (c >> 4)));
+            c = (uint8_t) "0123456789abcdef"[c & 0xF];
+        }
+        appendChar(w, (char)c);
+    }
+    appendChar(w, '"');
+}
+
+static void writeScalar(struct Writer *w, struct JsonCursor *c)
+{
+    const JsonValue *value = jsonCursorValue(c);
+    assert(!ISCONTAINER(jsonType(value)));
+    switch (jsonType(value)) {
+        case kTypeString: {
+            JsonSize length;
+            const char *string = jsonString(value, &length);
+            appendEscapedString(w, string, length);
+            break;
+        }
+        case kTypeInteger:
+            appendInteger(w, jsonInteger(value));
+            break;
+        case kTypeBoolean:
+            if (jsonBoolean(value)) {
+                appendString(w, "true", 4);
+            } else {
+                appendString(w, "false", 5);
+            }
+            break;
+        case kTypeReal:
+            if (isfinite(jsonReal(value))) {
+                appendFiniteReal(w, jsonReal(value));
+                break;
+            }
+            // Intentional fallthrough
+        default: // kTypeNull
+            appendString(w, "null", 4);
+            break;
+    }
+}
+
+static void writeEmptyContainer(struct Writer *w, struct JsonCursor *c)
+{
+    appendString(w, isObjectNode(jsonCursorValue(c)) ? "{}" : "[]", 2);
+}
+
+static JsonValue *cursorNext(struct JsonCursor *c)
+{
+    assert(jsonCursorIsValid(c));
+    JsonValue *value = jsonCursorValue(c);
+    if (ISCONTAINER(jsonType(value))) {
+        c->data += sizeOfContainer(value);
+    } else {
+        c->data += sizeOfScalar(value);
+    }
+    return jsonCursorValue(c);
+}
+
+void jsonCursorInit(JsonValue *root, enum JsonCursorMode mode, struct JsonCursor *c)
+{
+    *c = (struct JsonCursor){
+        .root = (char *)root,
+        .data = (char *)root,
+        .total = sizeOfSubTree(root),
+        .mode = mode,
+    };
+    if (mode == kCursorNormal) {
+        // Enter a container or invalidate
+        cursorNext(c);
+    }
+}
+
+JsonValue *jsonCursorValue(const struct JsonCursor *c)
+{
+    return (JsonValue *)c->data;
+}
+
+JsonBool jsonCursorIsValid(const struct JsonCursor *c)
+{
+    // Must have called jsonCursorInit(..., c). Also, the cursor must never move past the
+    // "1 past the end" element of the buffer. The call to jsonCursorNext(c) that invalidates
+    // c should put the cursor exactly 1 past the end.
+    assert(c->data && c->data - c->root <= c->total);
+    return c->data - c->root < c->total;
+}
+
+void jsonCursorNext(struct JsonCursor *c)
+{
+    assert(jsonCursorIsValid(c));
+    if (c->mode == kCursorNormal) {
+        // Skip the node, and all of its children if it is a container.
+        c->data += sizeOfSubTree(jsonCursorValue(c));
+    } else {
+        cursorNext(c);
+    }
+}
+
+MEWJSON_NODISCARD
+JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
+{
+    struct Writer w = {
+        .ptr = buffer,
+        .len = length,
+    };
+    struct JsonCursor c;
+    jsonCursorInit(root, kCursorRecursive, &c);
+    if (!jsonCursorIsValid(&c)) {
+        return -1;
+    } else if (!ISCONTAINER(jsonType(root))) {
+        // Root is not a container. Write out the single value and return.
+        writeScalar(&w, &c);
+        return w.acc;
+    } else if (isContainerEmpty(root)) {
+        // Root container is empty.
+        writeEmptyContainer(&w, &c);
+        return w.acc;
+    }
+    for (JsonValue *parent = NULL;;) {
+        JsonValue *value = jsonCursorValue(&c);
+        if (parent && isObjectNode(parent)) {
+            // Write an object key. Advance to the value.
+            assert(jsonType(value) == kTypeString);
+            JsonSize keyLen;
+            const char *key = jsonString(value, &keyLen);
+            appendEscapedString(&w, key, keyLen);
+            appendChar(&w, ':');
+            value = cursorNext(&c);
+        }
+
+        if (ISCONTAINER(jsonType(value))) {
+            // Value is a nested container.
+            if (!isContainerEmpty(value)) {
+                appendChar(&w, "[{"[isObjectNode(value)]);
+                parent = value;
+                cursorNext(&c);
+                continue;
+            }
+            writeEmptyContainer(&w, &c);
+        } else {
+            // Value is a scalar.
+            writeScalar(&w, &c);
+        }
+        cursorNext(&c);
+
+next_iteration:
+        // NOTE: clang-tidy complains that "parent" might be NULL here, resulting in a null pointer
+        //       dereference. The guard before the main loop should prevent that from happening.
+        if (c.data - (char *)parent < sizeOfSubTree(parent)) {
+            appendChar(&w, ',');
+        } else {
+            appendChar(&w, "]}"[isObjectNode(parent)]);
+            // Back out of nested containers. This block doesn't move the cursor at all, it just
+            // adjusts the parent pointer until a container is found with children that still need
+            // to be written.
+            if (parent == root) {
+                break;
+            }
+            JsonSize up;
+            containerDecodeUp(parent, &up);
+            char *grandparent = (char *)parent - up;
+            parent = (JsonValue *)grandparent;
+            goto next_iteration;
+        }
+    }
+    return w.acc;
 }
 
 enum JsonType jsonType(const JsonValue *value)
 {
-    return value->type;
+    const uint8_t *ptr = (uint8_t *)value;
+    return ptr[0] & kTypeMask;
 }
 
-JsonSize jsonLength(const JsonValue *value)
+JsonSize jsonContainerLength(const JsonValue *value)
 {
-    return value->size;
+    if (!ISCONTAINER(jsonType(value))) {
+        return 0;
+    }
+    JsonSize length = 0;
+    struct JsonCursor c;
+    jsonCursorInit((JsonValue *)value, kCursorNormal, &c);
+    while (jsonCursorIsValid(&c)) {
+        jsonCursorNext(&c);
+        ++length;
+    }
+    return length;
 }
 
-const char *jsonString(const JsonValue *value)
+const char *jsonString(const JsonValue *value, JsonSize *length)
 {
     assert(jsonType(value) == kTypeString);
-    return value->string;
+    const uint8_t *ptr = (uint8_t *)value + 1;
+
+    int64_t size;
+    ptr = decodeVarintI64(ptr, &size);
+    if (length) {
+        *length = size;
+    }
+    return (const char *)ptr;
 }
 
 int64_t jsonInteger(const JsonValue *value)
 {
     assert(jsonType(value) == kTypeInteger);
-    return value->integer;
+    const uint8_t *ptr = (uint8_t *)value + 1;
+
+    int64_t i;
+    decodeVarintI64(ptr, &i);
+    return i;
 }
 
 double jsonReal(const JsonValue *value)
 {
     assert(jsonType(value) == kTypeReal);
-    return value->real;
+    const uint8_t *ptr = (uint8_t *)value + 1;
+
+    uint64_t u;
+    decodeVarintU64(ptr, &u);
+
+    double real;
+    memcpy(&real, &u, sizeof(real));
+    return real;
 }
 
 JsonBool jsonBoolean(const JsonValue *value)
 {
     assert(jsonType(value) == kTypeBoolean);
-    return value->boolean;
+    const uint8_t *ptr = (uint8_t *)value;
+    return ptr[0] & kBooleanMask;
+}
+
+JsonValue *jsonRoot(JsonDocument *doc)
+{
+    assert(doc && doc->buffer);
+    return (JsonValue *)&doc->buffer[0];
+}
+
+void jsonDestroyDocument(JsonDocument *doc)
+{
+    if (doc) {
+        JSON_FREE(doc->a, doc->buffer, doc->capacity);
+        JSON_FREE(doc->a, doc, SIZEOF(*doc));
+    }
+}
+
+JsonSize jsonObjectFind(JsonValue *obj, const char *key, JsonSize length)
+{
+    assert(isObjectNode(obj));
+    struct JsonCursor c;
+    jsonCursorInit(obj, kCursorNormal, &c);
+    for (JsonSize n, i = 0; jsonCursorIsValid(&c); ++i) {
+        const char *p = jsonString(jsonCursorValue(&c), &n);
+        if (n == length && 0 == memcmp(p, key, (size_t)length)) {
+            return i;
+        }
+        jsonCursorNext(&c);
+    }
+    return -1;
+}
+
+JsonValue *jsonContainerGet(JsonValue *container, JsonSize index)
+{
+    assert(ISCONTAINER(jsonType(container)));
+    if (index < 0) {
+        return NULL;
+    }
+    struct JsonCursor c;
+    jsonCursorInit(container, kCursorNormal, &c);
+    for (JsonSize i = 0; i < index; ++i) {
+        jsonCursorNext(&c);
+        if (!jsonCursorIsValid(&c)) {
+            return NULL;
+        }
+    }
+    return jsonCursorValue(&c);
 }

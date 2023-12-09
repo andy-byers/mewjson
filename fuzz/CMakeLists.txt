@@ -1,4 +1,4 @@
 
-add_executable(fuzz_parser fuzz.c)
-target_link_libraries(fuzz_parser
-        PRIVATE mewjson mewjson_warnings)
+add_executable(fuzz fuzz.c)
+target_link_libraries(fuzz
+        PRIVATE mewjson mewjson_context)

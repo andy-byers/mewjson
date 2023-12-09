@@ -1,10 +1,7 @@
 
 add_executable(test_parser test.c)
 target_link_libraries(test_parser
-        PRIVATE mewjson mewjson_warnings)
-if(NOT WIN32)
-    target_link_libraries(test_parser PRIVATE m)
-endif()
+        PRIVATE mewjson mewjson_context)
 target_compile_definitions(test_parser
         PRIVATE TESTCASE_PREFIX="${CMAKE_CURRENT_SOURCE_DIR}/testcases/")
 add_test(NAME test_parser

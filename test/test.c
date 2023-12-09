@@ -1,5 +1,6 @@
 #include "mewjson.h"
 #include <float.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,9 +59,26 @@ static void *testMalloc(void *ctx, size_t size)
     return ptr;
 }
 
+static void *testRealloc(void *ctx, void *ptr, size_t oldSize, size_t newSize)
+{
+    struct TestAllocatorState *state = ctx;
+    if (state->oomCounter == 0) {
+        return NULL;
+    } else if (state->oomCounter > 0) {
+        --state->oomCounter;
+    }
+    JsonSize *newPtr = realloc(ptr, newSize);
+    if (newPtr) {
+        state->bytesUsed -= (JsonSize)oldSize;
+        state->bytesUsed += (JsonSize)newSize;
+    }
+    return newPtr;
+}
+
 static void testFree(void *ctx, void *ptr, size_t size)
 {
     if (ptr) {
+        CHECK(size > 0);
         struct TestAllocatorState *state = ctx;
         state->bytesUsed -= (JsonSize)size;
         CHECK(state->bytesUsed >= 0);
@@ -71,168 +89,9 @@ static void testFree(void *ctx, void *ptr, size_t size)
 static struct JsonAllocator sAllocator = {
     .ctx = &sState,
     .malloc = testMalloc,
+    .realloc = testRealloc,
     .free = testFree,
 };
-
-// Tags to indicate which handler function to return 0 from
-enum {
-    kStopAcceptKey = kTypeCount,
-    kStopBeginContainer,
-    kStopEndContainer,
-    kStopTypeCount,
-};
-
-enum {
-    kTypeObjectBegin = kTypeCount,
-    kTypeArrayBegin,
-    kTypeObjectEnd,
-    kTypeArrayEnd,
-};
-
-struct TestcaseContext {
-    struct JsonHandler base;
-
-    struct TestcaseNode {
-        int type;
-        JsonSize size;
-        union {
-            const char *string;
-            int64_t integer;
-            double real;
-            JsonBool boolean;
-        };
-    } *nodes;
-    JsonSize length;
-
-    char *sBuf;
-    char *sPtr;
-
-    // Stop the parse when this type of JSON value is encountered
-    int stopType;
-};
-
-#define MAX_SCALARS 8192
-
-void contextCleanup(struct TestcaseContext *ctx)
-{
-    free(ctx->nodes);
-    free(ctx->sBuf);
-}
-
-void contextSetString(struct TestcaseContext *ctx, const char *string, JsonSize length)
-{
-    CHECK(ctx->length <= MAX_SCALARS);
-    ctx->nodes[ctx->length] = (struct TestcaseNode){
-        .type = kTypeString,
-        .size = length,
-        .string = ctx->sPtr,
-    };
-    ++ctx->length;
-    memcpy(ctx->sPtr, string, (size_t)length);
-    ctx->sPtr += length;
-}
-
-void contextPushInteger(struct TestcaseContext *ctx, int64_t integer)
-{
-    CHECK(ctx->length <= MAX_SCALARS);
-    ctx->nodes[ctx->length] = (struct TestcaseNode){
-        .type = kTypeInteger,
-        .integer = integer,
-    };
-    ++ctx->length;
-}
-
-void contextPushReal(struct TestcaseContext *ctx, double real)
-{
-    CHECK(ctx->length <= MAX_SCALARS);
-    ctx->nodes[ctx->length] = (struct TestcaseNode){
-        .type = kTypeReal,
-        .real = real,
-    };
-    ++ctx->length;
-}
-
-void contextPushBoolean(struct TestcaseContext *ctx, JsonBool boolean)
-{
-    CHECK(ctx->length <= MAX_SCALARS);
-    ctx->nodes[ctx->length] = (struct TestcaseNode){
-        .type = kTypeBoolean,
-        .boolean = boolean,
-    };
-    ++ctx->length;
-}
-
-void contextPushNull(struct TestcaseContext *ctx)
-{
-    CHECK(ctx->length <= MAX_SCALARS);
-    ctx->nodes[ctx->length] = (struct TestcaseNode){
-        .type = kTypeNull,
-    };
-    ++ctx->length;
-}
-
-static JsonBool testAcceptKey(void *ctx, const char *key, JsonSize length)
-{
-    struct TestcaseContext *tc = ctx;
-    contextSetString(tc, key, length);
-    return tc->stopType != kStopAcceptKey;
-}
-
-static JsonBool testAcceptValue(void *ctx, const JsonValue *value)
-{
-    struct TestcaseContext *tc = ctx;
-    const enum JsonType type = jsonType(value);
-    if (type == kTypeInteger) {
-        contextPushInteger(tc, jsonInteger(value));
-    } else if (type == kTypeReal) {
-        contextPushReal(tc, jsonReal(value));
-    } else if (type == kTypeString) {
-        contextSetString(tc, jsonString(value), jsonLength(value));
-    } else if (type == kTypeBoolean) {
-        contextPushBoolean(tc, jsonBoolean(value));
-    } else {
-        CHECK(type == kTypeNull);
-        contextPushNull(tc);
-    }
-    return tc->stopType != (int)jsonType(value);
-}
-
-static JsonBool testBeginContainer(void *ctx, JsonBool isObject)
-{
-    struct TestcaseContext *tc = ctx;
-    tc->nodes[tc->length] = (struct TestcaseNode){
-        .type = isObject ? kTypeObjectBegin : kTypeArrayBegin,
-    };
-    ++tc->length;
-    return tc->stopType != kStopBeginContainer;
-}
-
-static JsonBool testEndContainer(void *ctx, JsonBool isObject)
-{
-    struct TestcaseContext *tc = ctx;
-    tc->nodes[tc->length] = (struct TestcaseNode){
-        .type = isObject ? kTypeObjectEnd : kTypeArrayEnd,
-    };
-    ++tc->length;
-    return tc->stopType != kStopEndContainer;
-}
-
-void contextInit(struct TestcaseContext *ctx)
-{
-    ctx->nodes = malloc(MAX_SCALARS * SIZEOF(ctx->nodes[0]));
-    ctx->sBuf = malloc(MAX_SCALARS * SIZEOF(ctx->sBuf[0]));
-    ctx->sPtr = ctx->sBuf;
-    ctx->stopType = -1;
-    ctx->length = 0;
-
-    ctx->base = (struct JsonHandler){
-        .ctx = ctx,
-        .acceptKey = testAcceptKey,
-        .acceptValue = testAcceptValue,
-        .beginContainer = testBeginContainer,
-        .endContainer = testEndContainer,
-    };
-}
 
 static const char *kNoTestNames[] = {
     "n_array_1_true_without_comma",
@@ -743,6 +602,28 @@ static struct Testcase {
 };
 // clang-format on
 
+struct TestcaseNode {
+    enum JsonType type;
+    JsonSize size;
+    union {
+        const char *string;
+        int64_t integer;
+        double real;
+        JsonBool boolean;
+    };
+};
+
+// clang-format off
+#define MAKE_STRING_LENGTH(s, n) (struct TestcaseNode){.type = kTypeString, .size = (n), .string = (s)}
+#define MAKE_STRING(s) (struct TestcaseNode){.type = kTypeString, .size = (JsonSize)strlen(s), .string = (s)}
+#define MAKE_INTEGER(i) (struct TestcaseNode){.type = kTypeInteger, .integer = (i)}
+#define MAKE_REAL(r) (struct TestcaseNode){.type = kTypeReal, .real = (r)}
+#define MAKE_BOOLEAN(b) (struct TestcaseNode){.type = kTypeBoolean, .boolean = (b)}
+#define MAKE_NULL() (struct TestcaseNode){.type = kTypeNull}
+#define MAKE_OBJECT(n) (struct TestcaseNode){.type = kTypeObject, .size = (n)}
+#define MAKE_ARRAY(n) (struct TestcaseNode){.type = kTypeArray, .size = (n)}
+// clang-format on
+
 static void sanityCheckRealEquality(void)
 {
     CHECK(areRealsEqual(0.0, -0.0));
@@ -757,13 +638,117 @@ static void sanityCheckRealEquality(void)
     CHECK(!areRealsEqual(NAN, NAN));
 }
 
-static void testParserInit(struct JsonParser *parser, struct TestcaseContext *ctx)
+static void testParserInit(struct JsonParser *parser)
 {
-    if (ctx) {
-        contextInit(ctx);
-    }
-    jsonParserInit(parser, ctx ? &ctx->base : NULL, &sAllocator);
+    jsonParserInit(parser, &sAllocator);
 }
+
+static void assertRoundtripMatches(JsonValue *root, struct JsonParser *parser)
+{
+    const JsonSize n = jsonWrite(NULL, 0, root);
+    char *result = malloc((size_t)n);
+    CHECK(n == jsonWrite(result, n, root));
+
+    JsonDocument *doc2 = jsonParse(result, n, parser);
+    CHECK(doc2);
+
+    char *result2 = malloc((size_t)n);
+    CHECK(n == jsonWrite(result2, n, jsonRoot(doc2)));
+    jsonDestroyDocument(doc2);
+
+    // Written JSON must match exactly.
+    CHECK(0 == memcmp(result, result2, (size_t)n));
+}
+
+static void testCheckRoundtrip(JsonValue *value)
+{
+    struct JsonParser parser;
+    testParserInit(&parser);
+    assertRoundtripMatches(value, &parser);
+}
+
+static void checkValueEqualsNode(JsonValue *value, const struct TestcaseNode *node)
+{
+    // Roundtrip this node by itself.
+    testCheckRoundtrip(value);
+    if (jsonType(value) != node->type) {
+        return;
+    }
+    switch (node->type) {
+        case kTypeString: {
+            JsonSize len;
+            const char *str = jsonString(value, &len);
+            CHECK(len == node->size);
+            CHECK(0 == memcmp(str, node->string, (size_t)len));
+            break;
+        }
+        case kTypeInteger:
+            CHECK(jsonInteger(value) == node->integer);
+            break;
+        case kTypeReal:
+            CHECK(areRealsEqual(jsonReal(value), node->real));
+            break;
+        case kTypeBoolean:
+            CHECK(jsonBoolean(value) == node->boolean);
+            break;
+        case kTypeNull:
+            break;
+        default: // kTypeObject || kTypeArray
+            CHECK(jsonContainerLength(value) == node->size);
+    }
+}
+
+static void assertSubTreeEquals(struct JsonCursor *c, const struct TestcaseNode *nodes, JsonSize n)
+{
+    for (JsonSize i = 0; i < n; ++i) {
+        const struct TestcaseNode *node = &nodes[i];
+        CHECK(jsonCursorIsValid(c));
+        checkValueEqualsNode(jsonCursorValue(c), node);
+        jsonCursorNext(c);
+    }
+}
+
+static void assertDocumentEquals(JsonDocument *doc, const struct TestcaseNode *nodes, JsonSize n,
+                                 enum JsonCursorMode mode)
+{
+    CHECK(doc);
+    struct JsonCursor c;
+    jsonCursorInit(jsonRoot(doc), mode, &c);
+    assertSubTreeEquals(&c, nodes, n);
+
+    JsonDocument *doc2 = jsonCloneDocument(doc);
+    CHECK(doc2);
+    jsonCursorInit(jsonRoot(doc2), mode, &c);
+    assertSubTreeEquals(&c, nodes, n);
+    jsonDestroyDocument(doc2);
+}
+
+static void assertJsonEquals(const char *json, JsonSize length, const struct TestcaseNode *nodes,
+                             JsonSize n, enum JsonCursorMode mode)
+{
+    struct JsonParser parser;
+    testParserInit(&parser);
+    JsonDocument *doc = jsonParse(json, length, &parser);
+    assertDocumentEquals(doc, nodes, n, mode);
+    jsonDestroyDocument(doc);
+}
+
+static void assertInvalidJson(const char *text, JsonSize length)
+{
+    struct JsonParser parser;
+    testParserInit(&parser);
+    JsonDocument *doc = jsonParse(text, length, &parser);
+    CHECK(!doc);
+    CHECK(parser.status > kStatusNoMemory);
+}
+
+#define ASSERT_SUB_TREE_EQUALS(c, a) assertSubTreeEquals(c, a, COUNTOF(a))
+#define ASSERT_DOCUMENT_EQUALS_R(d, a) assertDocumentEquals(d, a, COUNTOF(a), kCursorRecursive)
+#define ASSERT_DOCUMENT_EQUALS_N(d, a) assertDocumentEquals(d, a, COUNTOF(a), kCursorNormal)
+#define ASSERT_JSON_EQUALS_R(j, a)                                                                 \
+    assertJsonEquals(j, SIZEOF(j) - 1, a, COUNTOF(a), kCursorRecursive)
+#define ASSERT_JSON_EQUALS_N(j, a) assertJsonEquals(j, SIZEOF(j) - 1, a, COUNTOF(a), kCursorNormal)
+#define ASSERT_INVALID_JSON(j) assertInvalidJson(j, SIZEOF(j) - 1)
 
 static void testcaseInit(const char *name)
 {
@@ -805,16 +790,17 @@ static void testcaseOom(void)
 {
     testcaseInit("reader_oom");
     struct JsonParser parser;
-    testParserInit(&parser, NULL);
+    testParserInit(&parser);
 
     int failures = 0;
     for (;; ++failures) {
         sState.oomCounter = failures;
-        const enum JsonStatus s = jsonParse(kOomExample, (JsonSize)strlen(kOomExample), &parser);
-        if (s == kStatusOk) {
+        JsonDocument *doc = jsonParse(kOomExample, (JsonSize)strlen(kOomExample), &parser);
+        if (doc) {
+            jsonDestroyDocument(doc);
             break;
         }
-        CHECK(s == kStatusNoMemory);
+        CHECK(parser.status == kStatusNoMemory);
     }
     // Will likely end up failing quite a bit more than 2 times. Just a sanity check.
     CHECK(failures > 2);
@@ -825,35 +811,33 @@ static void testcaseRun(struct Testcase *tc)
     testcaseInit(tc->name);
 
     struct JsonParser parser;
-    testParserInit(&parser, NULL);
-    const enum JsonStatus s = jsonParse(tc->input, tc->inputLen, &parser);
+    testParserInit(&parser);
+    JsonDocument *doc = jsonParse(tc->input, tc->inputLen, &parser);
     if (tc->type == kTestcaseNo) {
+        CHECK(!doc);
         // Must fail for a reason other than running out of memory. OOM conditions are tested
         // separately (see TestcaseReaderOom()).
-        CHECK(s != kStatusOk);
-        CHECK(s != kStatusNoMemory);
+        CHECK(parser.status != kStatusOk);
+        CHECK(parser.status != kStatusNoMemory);
     } else {
-        CHECK(s == kStatusOk);
+        CHECK(doc);
+        CHECK(parser.status == kStatusOk);
+        assertRoundtripMatches(jsonRoot(doc), &parser);
+        JsonDocument *doc2 = jsonCloneDocument(doc);
+        assertRoundtripMatches(jsonRoot(doc2), &parser);
+        jsonDestroyDocument(doc2);
+        jsonDestroyDocument(doc);
     }
 }
 
 static void testcaseLargeNumbers(void)
 {
     testcaseInit("large_numbers");
-    static const char kText[] = "[-1e1111,1e1111]";
-
-    struct JsonParser parser;
-    struct TestcaseContext ctx;
-    testParserInit(&parser, &ctx);
-    CHECK(kStatusOk == jsonParse(kText, (JsonSize)strlen(kText), &parser));
-    CHECK(ctx.length == 4);
-    CHECK(ctx.nodes[0].type == kTypeArrayBegin);
-    CHECK(ctx.nodes[1].type == kTypeReal);
-    CHECK(ctx.nodes[2].type == kTypeReal);
-    CHECK(ctx.nodes[3].type == kTypeArrayEnd);
-    CHECK(!isfinite(ctx.nodes[1].real));
-    CHECK(!isfinite(ctx.nodes[2].real));
-    CHECK(ctx.nodes[1].real < ctx.nodes[2].real);
+    ASSERT_JSON_EQUALS_R("[-1e1111,1e1111]", ((struct TestcaseNode[]){
+                                                 MAKE_ARRAY(2),
+                                                 MAKE_REAL(-INFINITY),
+                                                 MAKE_REAL(INFINITY),
+                                             }));
 }
 
 static void testcaseExceedMaxDepth(void)
@@ -863,8 +847,9 @@ static void testcaseExceedMaxDepth(void)
     memset(sText, '[', (size_t)SIZEOF(sText));
 
     struct JsonParser parser;
-    testParserInit(&parser, NULL);
-    CHECK(kStatusExceededMaxDepth == jsonParse(sText, SIZEOF(sText), &parser));
+    testParserInit(&parser);
+    CHECK(!jsonParse(sText, SIZEOF(sText), &parser));
+    CHECK(kStatusExceededMaxDepth == parser.status);
 }
 
 static void testcaseParseErrors(void)
@@ -872,8 +857,8 @@ static void testcaseParseErrors(void)
     testcaseInit("parse_errors");
 
     static const struct {
-        enum JsonStatus reason;
         const char *text;
+        enum JsonStatus reason;
         JsonBool zeroOffset;
     } kInputs[] = {
         // Skip kStatusOk
@@ -897,25 +882,13 @@ static void testcaseParseErrors(void)
     };
 
     struct JsonParser parser;
-    testParserInit(&parser, NULL);
+    testParserInit(&parser);
     for (JsonSize i = 0; i < COUNTOF(kInputs); ++i) {
-        CHECK(kInputs[i].reason ==
-              jsonParse(kInputs[i].text, (JsonSize)strlen(kInputs[i].text), &parser));
+        JsonDocument *doc = jsonParse(kInputs[i].text, (JsonSize)strlen(kInputs[i].text), &parser);
+        CHECK(!doc);
+        CHECK(kInputs[i].reason == parser.status);
         CHECK(!parser.offset == kInputs[i].zeroOffset);
     }
-}
-
-static void testcaseUserStop(void)
-{
-    struct TestcaseContext ctx;
-    testcaseInit("user_stop");
-    struct JsonParser parser;
-    testParserInit(&parser, &ctx);
-    static const char kAllTypes[] = "{\"key\":[\"str\",123,1.0,true,null]}";
-    for (ctx.stopType = 0; ctx.stopType < kStopTypeCount; ++ctx.stopType) {
-        CHECK(kStatusStopped == jsonParse(kAllTypes, (JsonSize)strlen(kAllTypes), &parser));
-    }
-    contextCleanup(&ctx);
 }
 
 static char *readFileToString(const char *pathname, JsonSize *lengthOut)
@@ -960,11 +933,11 @@ static void runOnePassFailTest(const char *name, enum TestcaseType type)
 
 static void runExternalPassFailTests(void)
 {
-    for (JsonSize i = 0; i < COUNTOF(kNoTestNames); ++i) {
-        runOnePassFailTest(kNoTestNames[i], kTestcaseNo);
-    }
     for (JsonSize i = 0; i < COUNTOF(kYesTestNames); ++i) {
         runOnePassFailTest(kYesTestNames[i], kTestcaseYes);
+    }
+    for (JsonSize i = 0; i < COUNTOF(kNoTestNames); ++i) {
+        runOnePassFailTest(kNoTestNames[i], kTestcaseNo);
     }
 }
 
@@ -975,161 +948,195 @@ static void runInternalPassFailTests(void)
     }
 }
 
-static void testCheckTypes(const char *input, struct TestcaseNode *nodes, JsonSize n)
-{
-    struct JsonParser parser;
-    struct TestcaseContext ctx;
-    testParserInit(&parser, &ctx);
-    CHECK(kStatusOk == jsonParse(input, (JsonSize)strlen(input), &parser));
-    for (JsonSize i = 0; i < n; ++i) {
-        CHECK(ctx.nodes[i].type == nodes[i].type);
-    }
-}
-
 static void testcaseExpectedTypes(void)
 {
-    testCheckTypes("{\"boolean\":true}",
-                   (struct TestcaseNode[]){
-                       (struct TestcaseNode){.type = kTypeObjectBegin},
-                       (struct TestcaseNode){.type = kTypeString},
-                       (struct TestcaseNode){.type = kTypeBoolean},
-                       (struct TestcaseNode){.type = kTypeObjectEnd},
-                   },
-                   4);
-    testCheckTypes("[{},[],\"abc\",123,1.0,true,null]",
-                   (struct TestcaseNode[]){
-                       (struct TestcaseNode){.type = kTypeArrayBegin},
-                       (struct TestcaseNode){.type = kTypeObjectBegin},
-                       (struct TestcaseNode){.type = kTypeObjectEnd},
-                       (struct TestcaseNode){.type = kTypeArrayBegin},
-                       (struct TestcaseNode){.type = kTypeArrayEnd},
-                       (struct TestcaseNode){.type = kTypeString},
-                       (struct TestcaseNode){.type = kTypeInteger},
-                       (struct TestcaseNode){.type = kTypeReal},
-                       (struct TestcaseNode){.type = kTypeBoolean},
-                       (struct TestcaseNode){.type = kTypeNull},
-                       (struct TestcaseNode){.type = kTypeArrayEnd},
-                   },
-                   11);
-    testCheckTypes("[[{},[]],{\"abc\":123},[1.0,[[true],null]]]",
-                   (struct TestcaseNode[]){
-                       (struct TestcaseNode){.type = kTypeArrayBegin},
-                       (struct TestcaseNode){.type = kTypeArrayBegin},
-                       (struct TestcaseNode){.type = kTypeObjectBegin},
-                       (struct TestcaseNode){.type = kTypeObjectEnd},
-                       (struct TestcaseNode){.type = kTypeArrayBegin},
-                       (struct TestcaseNode){.type = kTypeArrayEnd},
-                       (struct TestcaseNode){.type = kTypeArrayEnd},
-                       (struct TestcaseNode){.type = kTypeObjectBegin},
-                       (struct TestcaseNode){.type = kTypeString},
-                       (struct TestcaseNode){.type = kTypeInteger},
-                       (struct TestcaseNode){.type = kTypeObjectEnd},
-                       (struct TestcaseNode){.type = kTypeArrayBegin},
-                       (struct TestcaseNode){.type = kTypeReal},
-                       (struct TestcaseNode){.type = kTypeArrayBegin},
-                       (struct TestcaseNode){.type = kTypeArrayBegin},
-                       (struct TestcaseNode){.type = kTypeBoolean},
-                       (struct TestcaseNode){.type = kTypeArrayEnd},
-                       (struct TestcaseNode){.type = kTypeNull},
-                       (struct TestcaseNode){.type = kTypeArrayEnd},
-                       (struct TestcaseNode){.type = kTypeArrayEnd},
-                       (struct TestcaseNode){.type = kTypeArrayEnd},
-                   },
-                   21);
+    testcaseInit("expected_types");
+
+    ASSERT_JSON_EQUALS_R("[[1,2,[3,[[4]]],5],6,7]", //
+                         ((struct TestcaseNode[]){
+                             MAKE_ARRAY(3),
+                             MAKE_ARRAY(4),
+                             MAKE_INTEGER(1),
+                             MAKE_INTEGER(2),
+                             MAKE_ARRAY(2),
+                             MAKE_INTEGER(3),
+                             MAKE_ARRAY(1),
+                             MAKE_ARRAY(1),
+                             MAKE_INTEGER(4),
+                             MAKE_INTEGER(5),
+                             MAKE_INTEGER(6),
+                             MAKE_INTEGER(7),
+                         }));
+
+    ASSERT_JSON_EQUALS_R("{\"boolean\":true}", //
+                         ((struct TestcaseNode[]){
+                             MAKE_OBJECT(2),
+                             MAKE_STRING("boolean"),
+                             MAKE_BOOLEAN(1),
+                         }));
+
+    ASSERT_JSON_EQUALS_R("[0,[[[1,2],3]]]", //
+                         ((struct TestcaseNode[]){
+                             MAKE_ARRAY(2),
+                             MAKE_INTEGER(0),
+                             MAKE_ARRAY(1),
+                             MAKE_ARRAY(2),
+                             MAKE_ARRAY(2),
+                             MAKE_INTEGER(1),
+                             MAKE_INTEGER(2),
+                             MAKE_INTEGER(3),
+                         }));
+
+    ASSERT_JSON_EQUALS_R("[{},[],\"abc\",123,1.0,true,null]", //
+                         ((struct TestcaseNode[]){
+                             MAKE_ARRAY(7),
+                             MAKE_OBJECT(0),
+                             MAKE_ARRAY(0),
+                             MAKE_STRING("abc"),
+                             MAKE_INTEGER(123),
+                             MAKE_REAL(1.0),
+                             MAKE_BOOLEAN(1),
+                             MAKE_NULL(),
+                         }));
+
+    ASSERT_JSON_EQUALS_R("[[{},[]],{\"abc\":123},[1.0,[[true],null]]]", //
+                         ((struct TestcaseNode[]){
+                             MAKE_ARRAY(3),
+                             MAKE_ARRAY(2),
+                             MAKE_OBJECT(0),
+                             MAKE_ARRAY(0),
+                             MAKE_OBJECT(2),
+                             MAKE_STRING("abc"),
+                             MAKE_INTEGER(123),
+                             MAKE_ARRAY(2),
+                             MAKE_REAL(1.0),
+                             MAKE_ARRAY(2),
+                             MAKE_ARRAY(1),
+                             MAKE_BOOLEAN(1),
+                             MAKE_NULL(),
+                         }));
 }
 
-static void testCheckInteger(const char *input, int64_t integer)
+static void testcaseNodeSizes(void)
 {
+    testcaseInit("node_sizes");
+    static const char kText[] = "[[],{},\"\",\"abc\",\"abcdefg\",0,-12345,12345,"
+                                "0.0,-1.0,1.0,true,null,null]";
     struct JsonParser parser;
-    struct TestcaseContext ctx;
-    testParserInit(&parser, &ctx);
-    CHECK(kStatusOk == jsonParse(input, (JsonSize)strlen(input), &parser));
-    CHECK(kTypeInteger == ctx.nodes[0].type);
-    CHECK(integer == ctx.nodes[0].integer);
-}
+    testParserInit(&parser);
+    JsonDocument *doc = jsonParse(kText, SIZEOF(kText) - 1, &parser);
+    CHECK(doc);
 
-static void testcaseIntegerIdentity(void)
-{
-    testcaseInit("number_integer");
-    testCheckInteger("-9223372036854775808", INT64_MIN);
-    testCheckInteger("-42389015228914", -42389015228914);
-    testCheckInteger("-24381906", -24381906);
-    testCheckInteger("-2394", -2394);
-    testCheckInteger("-1", -1);
-    testCheckInteger("0", 0);
-    testCheckInteger("1", 1);
-    testCheckInteger("3058", 3058);
-    testCheckInteger("39052783", 39052783);
-    testCheckInteger("9082348975302", 9082348975302);
-    testCheckInteger("9223372036854775807", INT64_MAX);
-}
-
-static void testCheckReal(const char *input, double real)
-{
-    struct JsonParser parser;
-    struct TestcaseContext ctx;
-    testParserInit(&parser, &ctx);
-    CHECK(kStatusOk == jsonParse(input, (JsonSize)strlen(input), &parser));
-    CHECK(kTypeReal == ctx.nodes[0].type);
-    CHECK(areRealsEqual(real, ctx.nodes[0].real));
-}
-
-static void testcaseRealIdentity(void)
-{
-    testcaseInit("number_real");
-    testCheckReal("1.0", 1.0);
-    testCheckReal("1.000000000000000005", 1.000000000000000005);
-    testCheckReal("1e-1000", 0.0);
-    testCheckReal("1e3", 1e3);
-    testCheckReal("1e+3", 1e+3);
-    testCheckReal("1e-3", 1e-3);
-    testCheckReal("1.2e3", 1.2e3);
-    testCheckReal("1.2e+3", 1.2e+3);
-    testCheckReal("1.2e-3", 1.2e-3);
-
-    // Overflowing integers are parsed as real numbers.
-    testCheckReal("99999999999999999999", 99999999999999999999.0);
-    testCheckReal("-9223372036854775809", (double)INT64_MIN - 1.0);
-    testCheckReal("9223372036854775808", (double)INT64_MAX + 1.0);
-    testCheckReal("-9223372036854775809.5", (double)INT64_MIN - 1.5);
-    testCheckReal("9223372036854775808.5", (double)INT64_MAX + 1.5);
-}
-
-static void testCheckLiteral(const char *input, JsonBool expectNull, JsonBool booleanValue)
-{
-    struct JsonParser parser;
-    struct TestcaseContext ctx;
-    testParserInit(&parser, &ctx);
-    CHECK(kStatusOk == jsonParse(input, (JsonSize)strlen(input), &parser));
-    if (expectNull) {
-        CHECK(ctx.nodes[0].type == kTypeNull);
-    } else if (booleanValue) {
-        CHECK(ctx.nodes[0].type == kTypeBoolean);
-        CHECK(ctx.nodes[0].boolean);
-    } else {
-        CHECK(ctx.nodes[0].type == kTypeBoolean);
-        CHECK(!ctx.nodes[0].boolean);
+    static const char *kNames[] = {
+        "root header ", "empty object", "empty array ", "empty string", "string (3)  ",
+        "string (7)  ", "integer (0) ", "integer (-) ", "integer (+) ", "real (0)    ",
+        "real (+)    ", "real (-)    ", "boolean     ", "null        ",
+    };
+    char *values[COUNTOF(kNames) + 1];
+    struct JsonCursor c;
+    jsonCursorInit(jsonRoot(doc), kCursorRecursive, &c);
+    for (JsonSize i = 0; jsonCursorIsValid(&c); ++i) {
+        values[i] = (char *)jsonCursorValue(&c);
+        jsonCursorNext(&c);
     }
+    for (JsonSize i = 0; i < COUNTOF(kNames); ++i) {
+        const JsonSize sizeInBytes = values[i + 1] - values[i];
+        printf("    %s  %" PRId64 "\n", kNames[i], (int64_t)sizeInBytes);
+    }
+    jsonDestroyDocument(doc);
 }
 
-static void testcaseLiteralIdentity(void)
+static void testcaseIntegers(void)
 {
-    testcaseInit("literal_identity");
-    testCheckLiteral("null", 1, 0);
-    testCheckLiteral("false", 0, 0);
-    testCheckLiteral("true", 0, 1);
+    testcaseInit("numbers_integer");
+    ASSERT_JSON_EQUALS_R( //
+        "[-9223372036854775808,"
+        " -42389015228914,"
+        " -24381906,"
+        " -2394,"
+        " -1,"
+        " 0,"
+        " 1,"
+        " 3058,"
+        " 39052783,"
+        " 9082348975302,"
+        " 9223372036854775807]",
+        ((struct TestcaseNode[]){
+            MAKE_ARRAY(11),
+            MAKE_INTEGER(INT64_MIN),
+            MAKE_INTEGER(-42389015228914),
+            MAKE_INTEGER(-24381906),
+            MAKE_INTEGER(-2394),
+            MAKE_INTEGER(-1),
+            MAKE_INTEGER(0),
+            MAKE_INTEGER(1),
+            MAKE_INTEGER(3058),
+            MAKE_INTEGER(39052783),
+            MAKE_INTEGER(9082348975302),
+            MAKE_INTEGER(INT64_MAX),
+        }));
+}
+
+static void testcaseReals(void)
+{
+    testcaseInit("numbers_real");
+    ASSERT_JSON_EQUALS_R( //
+        "[1.0,"
+        " 1.000000000000000005,"
+        " 1e-1000,"
+        " 1e3,"
+        " 1e+3,"
+        " 1e-3,"
+        " 1.2e3,"
+        " 1.2e+3,"
+        " 1.2e-3,"
+        // Overflowing integers are parsed as real numbers.
+        " 99999999999999999999,"
+        " -9223372036854775809,"
+        " 9223372036854775808,"
+        " -9223372036854775809.5,"
+        " 9223372036854775808.5]",
+        ((struct TestcaseNode[]){
+            MAKE_ARRAY(14),
+            MAKE_REAL(1.0),
+            MAKE_REAL(1.000000000000000005),
+            MAKE_REAL(0.0),
+            MAKE_REAL(1e3),
+            MAKE_REAL(1e+3),
+            MAKE_REAL(1e-3),
+            MAKE_REAL(1.2e3),
+            MAKE_REAL(1.2e+3),
+            MAKE_REAL(1.2e-3),
+            MAKE_REAL(99999999999999999999.0),
+            MAKE_REAL((double)INT64_MIN - 1.0),
+            MAKE_REAL((double)INT64_MAX + 1.0),
+            MAKE_REAL((double)INT64_MIN - 1.5),
+            MAKE_REAL((double)INT64_MAX + 1.5),
+        }));
+}
+
+static void testcaseLiterals(void)
+{
+    testcaseInit("literals");
+    ASSERT_JSON_EQUALS_R("[null,false,true]", //
+                         ((struct TestcaseNode[]){
+                             MAKE_ARRAY(3),
+                             MAKE_NULL(),
+                             MAKE_BOOLEAN(0),
+                             MAKE_BOOLEAN(1),
+                         }));
 }
 
 static void testCheckUtf8(const char *input, JsonBool expectOk)
 {
     struct JsonParser parser;
-    struct TestcaseContext ctx;
-    testParserInit(&parser, &ctx);
-    const enum JsonStatus s = jsonParse(input, (JsonSize)strlen(input), &parser);
+    testParserInit(&parser);
+    JsonDocument *doc = jsonParse(input, (JsonSize)strlen(input), &parser);
     if (expectOk) {
-        CHECK(s == kStatusOk);
+        CHECK(parser.status == kStatusOk);
+        jsonDestroyDocument(doc);
     } else {
-        CHECK(s == kStatusStringInvalidUtf8);
+        CHECK(parser.status == kStatusStringInvalidUtf8);
     }
 }
 
@@ -1160,7 +1167,7 @@ static void testcaseUtf8(void)
         {"\"abcdefg abcdefg abcdefg abcdefg abcdefghabcdefghabcdefghabcdefgh\"", 1},
 
         // From @rusticstuff/simdutf8
-        {"\"öäüÖÄÜß\"", 1},   // umlauts
+        {"\"öäüÖÄÜß\"", 1},          // umlauts
         {"\"❤️✨🥺🔥😂😊✔️👍🥰\"", 1}, // emojis
         {"\"断用山昨屈内銀代意検瓶調像。情旗最投任留財夜隆年表高学送意功者。辺図掲記込真通第民国聞"
          "平。海帰傷芸記築世防橋整済歳権君注。選紙例並情夕破勢景移情誇進場豊読。景関有権米武野範随"
@@ -1231,42 +1238,99 @@ static void testcaseUtf8(void)
     }
 }
 
-static JsonBool multiDocEndContainer(void *ctx, JsonBool isObject)
+// static JsonBool multiDocEndContainer(void *ctx, JsonBool isObject)
+//{
+//     testEndContainer(ctx, isObject);
+//     return 0; // Stop on the first ']' or '}'
+// }
+
+// static void testcaseMultipleDocs(void)
+//{
+//     testcaseInit("multiple_docs");
+//     static const int kExpectedTypes[] = {
+//         kTypeObjectBegin, kTypeObjectEnd,   kTypeArrayBegin, kTypeArrayEnd,   kTypeObjectBegin,
+//         kTypeString,      kTypeInteger,     kTypeObjectEnd,  kTypeArrayBegin, kTypeBoolean,
+//         kTypeArrayEnd,    kTypeObjectBegin, kTypeObjectEnd,  kTypeArrayBegin, kTypeInteger,
+//         kTypeInteger,     kTypeInteger,     kTypeArrayEnd,   kTypeArrayBegin, kTypeArrayEnd,
+//         kTypeObjectBegin, kTypeString,      kTypeInteger,    kTypeObjectEnd,
+//     };
+//     static const char kInput[] = "{}[]{\"a\":1} [true]\n{}\r\n[1,2,3]     []\t{\"b\":1}";
+//     JsonSize length = SIZEOF(kInput) - 1;
+//     struct JsonParser parser;
+//     struct TestcaseContext ctx;
+//     testParserInit(&parser, &ctx);
+//     parser.h.endContainer = multiDocEndContainer;
+//
+//     const char *ptr = kInput;
+//     while (length > 0) {
+//         enum JsonStatus s = jsonParse(ptr, length, &parser);
+//         CHECK(s == kStatusStopped);
+//         length -= parser.offset;
+//         ptr += parser.offset;
+//     }
+//     for (JsonSize i = 0; i < ctx.length; ++i) {
+//         CHECK(ctx.nodes[i].type == kExpectedTypes[i]);
+//     }
+// }
+
+static void testcaseLonelyValues(void)
 {
-    testEndContainer(ctx, isObject);
-    return 0; // Stop on the first ']' or '}'
+    testcaseInit("lonely_values");
+    ASSERT_JSON_EQUALS_R("{}", ((struct TestcaseNode[]){MAKE_OBJECT(0)}));
+    ASSERT_JSON_EQUALS_R("[]", ((struct TestcaseNode[]){MAKE_ARRAY(0)}));
+    ASSERT_JSON_EQUALS_R("\"string\"", ((struct TestcaseNode[]){MAKE_STRING("string")}));
+    ASSERT_JSON_EQUALS_R("42", ((struct TestcaseNode[]){MAKE_INTEGER(42)}));
+    ASSERT_JSON_EQUALS_R("1.5e-2", ((struct TestcaseNode[]){MAKE_REAL(1.5e-2)}));
+    ASSERT_JSON_EQUALS_R("true", ((struct TestcaseNode[]){MAKE_BOOLEAN(1)}));
+    ASSERT_JSON_EQUALS_R("false", ((struct TestcaseNode[]){MAKE_BOOLEAN(0)}));
+    ASSERT_JSON_EQUALS_R("null", ((struct TestcaseNode[]){MAKE_NULL()}));
 }
 
-static void testcaseMultipleDocs(void)
+static void testcaseNormalCursor(void)
 {
-    testcaseInit("multiple_docs");
-    static const int kExpectedTypes[] = {
-        kTypeObjectBegin, kTypeObjectEnd,   kTypeArrayBegin, kTypeArrayEnd,   kTypeObjectBegin,
-        kTypeString,      kTypeInteger,     kTypeObjectEnd,  kTypeArrayBegin, kTypeBoolean,
-        kTypeArrayEnd,    kTypeObjectBegin, kTypeObjectEnd,  kTypeArrayBegin, kTypeInteger,
-        kTypeInteger,     kTypeInteger,     kTypeArrayEnd,   kTypeArrayBegin, kTypeArrayEnd,
-        kTypeObjectBegin, kTypeString,      kTypeInteger,    kTypeObjectEnd,
-    };
-    static const char kInput[] = "{}[]{\"a\":1} [true]\n{}\r\n[1,2,3]     []\t{\"b\":1}";
-    JsonSize length = SIZEOF(kInput) - 1;
-    struct JsonParser parser;
-    struct TestcaseContext ctx;
-    testParserInit(&parser, &ctx);
-    parser.h.endContainer = multiDocEndContainer;
-
-    const char *ptr = kInput;
-    while (length > 0) {
-        enum JsonStatus s = jsonParse(ptr, length, &parser);
-        CHECK(s == kStatusStopped);
-        length -= parser.offset;
-        ptr += parser.offset;
-    }
-    for (JsonSize i = 0; i < ctx.length; ++i) {
-        CHECK(ctx.nodes[i].type == kExpectedTypes[i]);
-    }
+    testcaseInit("normal_cursor");
+    ASSERT_JSON_EQUALS_N("[1,2,3]", //
+                         ((struct TestcaseNode[]){
+                             MAKE_INTEGER(1),
+                             MAKE_INTEGER(2),
+                             MAKE_INTEGER(3),
+                         }));
+    ASSERT_JSON_EQUALS_N("[1,[2,[3],4],5]", //
+                         ((struct TestcaseNode[]){
+                             MAKE_INTEGER(1),
+                             MAKE_ARRAY(3),
+                             MAKE_INTEGER(5),
+                         }));
+    ASSERT_JSON_EQUALS_N("{\"x\":null,\"y\":[[[1]]]}", //
+                         ((struct TestcaseNode[]){
+                             MAKE_STRING("x"),
+                             MAKE_NULL(),
+                             MAKE_STRING("y"),
+                             MAKE_ARRAY(1),
+                         }));
+    ASSERT_JSON_EQUALS_N(
+        "{\"a\":[1,2,3],\"b\":{\"x\":null,\"y\":[[[1]]]},\"c\":[1,[2,[3],4],5]}", //
+        ((struct TestcaseNode[]){
+            MAKE_STRING("a"),
+            MAKE_ARRAY(3),
+            MAKE_STRING("b"),
+            MAKE_OBJECT(4),
+            MAKE_STRING("c"),
+            MAKE_ARRAY(3),
+        }));
 }
 
-static void testcaseEmbeddedNull(void) {}
+static void testcaseEmbeddedNull(void)
+{
+    testcaseInit("embedded_null");
+    ASSERT_INVALID_JSON("123\0");
+    ASSERT_INVALID_JSON("1.0\0");
+    ASSERT_INVALID_JSON("false\0");
+    ASSERT_INVALID_JSON("null\0");
+    ASSERT_INVALID_JSON("\"abc\"\0");
+    ASSERT_INVALID_JSON("[1,2,3]\0");
+    ASSERT_INVALID_JSON("{\"k\":123}\0");
+}
 
 int main(void)
 {
@@ -1276,16 +1340,18 @@ int main(void)
     runExternalPassFailTests();
     runInternalPassFailTests();
     testcaseExpectedTypes();
+    testcaseNodeSizes();
     testcaseOom();
     testcaseExceedMaxDepth();
     testcaseLargeNumbers();
     testcaseParseErrors();
-    testcaseUserStop();
-    testcaseIntegerIdentity();
-    testcaseRealIdentity();
-    testcaseLiteralIdentity();
+    testcaseLiterals();
     testcaseUtf8();
-    testcaseMultipleDocs();
+    testcaseReals();
+    testcaseIntegers();
+    testcaseLonelyValues();
+    testcaseNormalCursor();
+    //    testcaseMultipleDocs();
     testcaseEmbeddedNull();
     checkForLeaks();
 
