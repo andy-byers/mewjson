@@ -109,10 +109,11 @@ void jsonDestroyDocument(JsonDocument *doc);
 JsonValue *jsonRoot(JsonDocument *doc);
 
 // Write a JSON value and all its descendents to a buffer
-// Returns the number of bytes needed to hold the serialized JSON data. jsonWrite() will write as
-// much as possible if there is not enough space. Call jsonWrite(NULL, 0, root) to check how many
-// bytes are required to write a particular value. The written text is always a valid JSON document.
-JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root);
+// Returns the number of bytes needed to hold the serialized JSON data. jsonStringify() will write
+// as much as possible if there is not enough space. Call jsonStringify(NULL, 0, root) to check how
+// many bytes are required to write a particular value. The written text is always a valid JSON
+// document.
+JsonSize jsonStringify(char *buffer, JsonSize length, JsonValue *root);
 
 // Return an enumerator describing the type of JSON value
 enum JsonType jsonType(const JsonValue *value);
@@ -130,7 +131,7 @@ int64_t jsonInteger(const JsonValue *value);
 
 // Return the value of a JSON real number
 // If the magnitude of the number is too great to be represented as a double-precision float,
-// then +/-Inf is returned as appropriate. Note that jsonWrite() will convert such numbers to
+// then +/-Inf is returned as appropriate. Note that jsonStringify() will convert such numbers to
 // null.
 double jsonReal(const JsonValue *value);
 
@@ -173,12 +174,15 @@ enum JsonCursorMode {
 
 struct JsonCursor {
     char *root;
-    char *data;
+    char *cursor;
+    char *parent;
     JsonSize total;
     enum JsonCursorMode mode;
 };
 
 JsonValue *jsonCursorValue(const struct JsonCursor *c);
+
+JsonValue *jsonCursorParent(const struct JsonCursor *c);
 
 // Initialize a cursor for traversal over some portion of a JSON document
 // Must be called before any other jsonCursor*() function.

@@ -1304,9 +1304,9 @@ static JsonValue *cursorNext(struct JsonCursor *c)
     assert(jsonCursorIsValid(c));
     JsonValue *value = jsonCursorValue(c);
     if (ISCONTAINER(jsonType(value))) {
-        c->data += sizeOfContainer(value);
+        c->cursor += sizeOfContainer(value);
     } else {
-        c->data += sizeOfScalar(value);
+        c->cursor += sizeOfScalar(value);
     }
     return jsonCursorValue(c);
 }
@@ -1315,7 +1315,7 @@ void jsonCursorInit(JsonValue *root, enum JsonCursorMode mode, struct JsonCursor
 {
     *c = (struct JsonCursor){
         .root = (char *)root,
-        .data = (char *)root,
+        .cursor = (char *)root,
         .total = sizeOfSubTree(root),
         .mode = mode,
     };
@@ -1327,7 +1327,12 @@ void jsonCursorInit(JsonValue *root, enum JsonCursorMode mode, struct JsonCursor
 
 JsonValue *jsonCursorValue(const struct JsonCursor *c)
 {
-    return (JsonValue *)c->data;
+    return (JsonValue *)c->cursor;
+}
+
+JsonValue *jsonCursorParent(const struct JsonCursor *c)
+{
+    return (JsonValue *)c->parent;
 }
 
 JsonBool jsonCursorIsValid(const struct JsonCursor *c)
@@ -1335,8 +1340,8 @@ JsonBool jsonCursorIsValid(const struct JsonCursor *c)
     // Must have called jsonCursorInit(..., c). Also, the cursor must never move past the
     // "1 past the end" element of the buffer. The call to jsonCursorNext(c) that invalidates
     // c should put the cursor exactly 1 past the end.
-    assert(c->data && c->data - c->root <= c->total);
-    return c->data - c->root < c->total;
+    assert(c->cursor && c->cursor - c->root <= c->total);
+    return c->cursor - c->root < c->total;
 }
 
 void jsonCursorNext(struct JsonCursor *c)
@@ -1344,14 +1349,30 @@ void jsonCursorNext(struct JsonCursor *c)
     assert(jsonCursorIsValid(c));
     if (c->mode == kCursorNormal) {
         // Skip the node, and all of its children if it is a container.
-        c->data += sizeOfSubTree(jsonCursorValue(c));
+        c->cursor += sizeOfSubTree(jsonCursorValue(c));
     } else {
-        cursorNext(c);
+        JsonValue *value = jsonCursorValue(c);
+        cursorNext(c); // Move past the current node
+        if (ISCONTAINER(jsonType(value))) {
+            c->parent = (char *)value;
+        } else if (!c->parent) {
+            return;
+        }
+        // Make sure the parent pointer is correct.
+        while (c->parent != c->root) {
+            JsonValue *parent = (JsonValue *)c->parent;
+            if (c->cursor - c->parent < sizeOfSubTree(parent)) {
+                break;
+            }
+            JsonSize up;
+            containerDecodeUp(parent, &up);
+            c->parent -= up;
+        }
     }
 }
 
 MEWJSON_NODISCARD
-JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
+JsonSize jsonStringify(char *buffer, JsonSize length, JsonValue *root)
 {
     struct Writer w = {
         .ptr = buffer,
@@ -1400,7 +1421,7 @@ JsonSize jsonWrite(char *buffer, JsonSize length, JsonValue *root)
 next_iteration:
         // NOTE: clang-tidy complains that "parent" might be NULL here, resulting in a null pointer
         //       dereference. The guard before the main loop should prevent that from happening.
-        if (c.data - (char *)parent < sizeOfSubTree(parent)) {
+        if (c.cursor - (char *)parent < sizeOfSubTree(parent)) {
             appendChar(&w, ',');
         } else {
             appendChar(&w, "]}"[isObjectNode(parent)]);
