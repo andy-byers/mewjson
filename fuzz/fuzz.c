@@ -20,7 +20,7 @@ static char *intoText(JsonDocument *doc, JsonSize *writeLen)
     CHECK(doc);
     JsonValue *root = jsonRoot(doc);
     if (*writeLen == 0) {
-        *writeLen = jsonWrite(NULL, 0, root);
+        *writeLen = jsonStringify(NULL, 0, root);
     }
     const JsonSize n = *writeLen;
     CHECK(n > 0);
@@ -28,7 +28,7 @@ static char *intoText(JsonDocument *doc, JsonSize *writeLen)
     char *result = malloc((size_t)n);
     CHECK(result);
 
-    CHECK(n == jsonWrite(result, n, root));
+    CHECK(n == jsonStringify(result, n, root));
     jsonDestroyDocument(doc);
     return result;
 }

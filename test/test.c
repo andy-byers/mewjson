@@ -529,7 +529,7 @@ static const char *kYesTestNames[] = {
     "i_structure_500_nested_arrays",
 
     // These 2 have extremely large real numbers. This implementation lets them become
-    // +/-Inf. jsonWrite() will write them as nulls.
+    // +/-Inf. jsonStringify() will write them as nulls.
     "fail60",
     "fail73",
 };
@@ -602,8 +602,12 @@ static struct Testcase {
 };
 // clang-format on
 
+enum {
+    kTypeKey = kTypeCount,
+};
+
 struct TestcaseNode {
-    enum JsonType type;
+    int type;
     JsonSize size;
     union {
         const char *string;
@@ -614,8 +618,10 @@ struct TestcaseNode {
 };
 
 // clang-format off
-#define MAKE_STRING_LENGTH(s, n) (struct TestcaseNode){.type = kTypeString, .size = (n), .string = (s)}
-#define MAKE_STRING(s) (struct TestcaseNode){.type = kTypeString, .size = (JsonSize)strlen(s), .string = (s)}
+#define MAKE_KEY_WITH_LEN(s, n) (struct TestcaseNode){.type = kTypeString, .size = (n), .string = (s)}
+#define MAKE_STRING_WITH_LEN(s, n) (struct TestcaseNode){.type = kTypeString, .size = (n), .string = (s)}
+#define MAKE_KEY(s) MAKE_KEY_WITH_LEN(s, (JsonSize)strlen(s))
+#define MAKE_STRING(s) MAKE_STRING_WITH_LEN(s, (JsonSize)strlen(s))
 #define MAKE_INTEGER(i) (struct TestcaseNode){.type = kTypeInteger, .integer = (i)}
 #define MAKE_REAL(r) (struct TestcaseNode){.type = kTypeReal, .real = (r)}
 #define MAKE_BOOLEAN(b) (struct TestcaseNode){.type = kTypeBoolean, .boolean = (b)}
@@ -645,15 +651,15 @@ static void testParserInit(struct JsonParser *parser)
 
 static void assertRoundtripMatches(JsonValue *root, struct JsonParser *parser)
 {
-    const JsonSize n = jsonWrite(NULL, 0, root);
+    const JsonSize n = jsonStringify(NULL, 0, root);
     char *result = malloc((size_t)n);
-    CHECK(n == jsonWrite(result, n, root));
+    CHECK(n == jsonStringify(result, n, root));
 
     JsonDocument *doc2 = jsonParse(result, n, parser);
     CHECK(doc2);
 
     char *result2 = malloc((size_t)n);
-    CHECK(n == jsonWrite(result2, n, jsonRoot(doc2)));
+    CHECK(n == jsonStringify(result2, n, jsonRoot(doc2)));
     jsonDestroyDocument(doc2);
 
     // Written JSON must match exactly.
@@ -667,14 +673,19 @@ static void testCheckRoundtrip(JsonValue *value)
     assertRoundtripMatches(value, &parser);
 }
 
-static void checkValueEqualsNode(JsonValue *value, const struct TestcaseNode *node)
+static void checkValueEqualsNode(struct JsonCursor *c, const struct TestcaseNode *node)
 {
+    JsonValue *value = jsonCursorValue(c);
     // Roundtrip this node by itself.
     testCheckRoundtrip(value);
-    if (jsonType(value) != node->type) {
-        return;
+    if (node->type == kTypeKey) {
+        CHECK(kTypeString == jsonType(value));
+        CHECK(kTypeObject == jsonType(jsonCursorParent(c)));
+    } else {
+        CHECK(node->type == (int)jsonType(value));
     }
     switch (node->type) {
+        case kTypeKey:
         case kTypeString: {
             JsonSize len;
             const char *str = jsonString(value, &len);
@@ -703,7 +714,7 @@ static void assertSubTreeEquals(struct JsonCursor *c, const struct TestcaseNode 
     for (JsonSize i = 0; i < n; ++i) {
         const struct TestcaseNode *node = &nodes[i];
         CHECK(jsonCursorIsValid(c));
-        checkValueEqualsNode(jsonCursorValue(c), node);
+        checkValueEqualsNode(c, node);
         jsonCursorNext(c);
     }
 }
@@ -971,7 +982,7 @@ static void testcaseExpectedTypes(void)
     ASSERT_JSON_EQUALS_R("{\"boolean\":true}", //
                          ((struct TestcaseNode[]){
                              MAKE_OBJECT(2),
-                             MAKE_STRING("boolean"),
+                             MAKE_KEY("boolean"),
                              MAKE_BOOLEAN(1),
                          }));
 
@@ -1303,19 +1314,19 @@ static void testcaseNormalCursor(void)
                          }));
     ASSERT_JSON_EQUALS_N("{\"x\":null,\"y\":[[[1]]]}", //
                          ((struct TestcaseNode[]){
-                             MAKE_STRING("x"),
+                             MAKE_KEY("x"),
                              MAKE_NULL(),
-                             MAKE_STRING("y"),
+                             MAKE_KEY("y"),
                              MAKE_ARRAY(1),
                          }));
     ASSERT_JSON_EQUALS_N(
         "{\"a\":[1,2,3],\"b\":{\"x\":null,\"y\":[[[1]]]},\"c\":[1,[2,[3],4],5]}", //
         ((struct TestcaseNode[]){
-            MAKE_STRING("a"),
+            MAKE_KEY("a"),
             MAKE_ARRAY(3),
-            MAKE_STRING("b"),
+            MAKE_KEY("b"),
             MAKE_OBJECT(4),
-            MAKE_STRING("c"),
+            MAKE_KEY("c"),
             MAKE_ARRAY(3),
         }));
 }
