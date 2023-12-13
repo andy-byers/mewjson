@@ -10,14 +10,17 @@ The library requires the following to compile:
 + C compiler with support for C11
 
 ## Features
-+ Stores whole numbers between -9223372036854775808 and 9223372036854775807, inclusive, as 64-bit signed integers
 + Uses a packed parse tree representation to save memory
++ Parse tree generally uses less memory than the corresponding minified JSON text
++ Stores whole numbers between `-(1 << 63)` and `(1 << 63) - 1`, inclusive, as 64-bit signed integers
++ Parse tree can be directly stored and loaded without having to parse the original document again
++ Parse tree traversal and stringify operations require no additional dynamic allocations
 
 ## Caveats
 + Only supports DOM-style (parse tree-based) parsing
++ Parse tree is immutable, and more expensive to traverse than the corresponding non-packed version
 + Parser uses dynamic memory
 + Real number handling is slow and breaks in certain locales (uses `strtod()` and `snprintf()`)
-+ Parse tree is immutable
 
 ## API
 mewjson aims to provide a small, convenient API for parsing and validating JSON data.
@@ -44,6 +47,52 @@ if (!doc) {
     fprintf(stderr, "parser error %d at offset %ld\n",
             parser.status, parser.offset);
     abort();
+}
+```
+
+### Traverse a JSON document
+mewjson provides cursors for iterating over parsed documents.
+There are 2 cursor modes: `kCursorNormal`, and `kCursorRecursive`.
+`kCursorNormal` iterates over the immediate children of the target value.
+`kCursorRecursive` iterates over all nodes rooted at the target value, including the target value itself.
+
+```C
+struct JsonCursor c;
+jsonCursorInit(jsonRoot(doc), kCursorRecursive, &c);
+while (jsonCursorIsValid(&c)) {
+    JsonValue *parent = jsonCursorParent(&c);
+    if (parent && jsonType(parent) == kTypeObject) {
+        JsonValue *key = jsonCursorValue(&c);
+
+        JsonSize keySize;
+        const char *keyData = jsonString(key, &keySize);
+        // keyData and keySize contain a pointer to the key data, and the length of the key in bytes, 
+        // respectively. The key is considered its own JSON node. Skip it to get to the value.
+        jsonCursorNext(&c);
+    }
+    // Do something with the value node.
+    JsonValue *target = jsonCursorValue(&c);
+    switch (jsonType(target)) {
+        case kTypeString:
+            // jsonString(...)
+            break;
+        case kTypeInteger:
+            // jsonInteger(...)
+            break;
+        case kTypeReal:
+            // jsonReal(...)
+            break;
+        case kTypeBoolean:
+            // jsonBoolean(...)
+            break;
+        case kTypeObject:
+            // jsonObjectFind(...)
+        case kTypeArray:
+            // jsonContainerLength(...)
+            // jsonContainerGet(...)
+            break;
+    }
+    jsonCursorNext(&c);
 }
 ```
 

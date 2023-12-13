@@ -1,4 +1,4 @@
-// mewjson: a tiny JSON parser
+// mewjson: a tiny JSON library
 // Distributed under the MIT License (http://opensource.org/licenses/MIT)
 
 #include "mewjson.h"
@@ -121,14 +121,15 @@ static void jsonFree(void *ctx, void *ptr, size_t size)
     free(ptr);
 }
 
+static struct JsonAllocator sAllocatorPrototype = {
+    .malloc = jsonMalloc,
+    .realloc = jsonRealloc,
+    .free = jsonFree,
+};
+
 void jsonParserInit(struct JsonParser *parser, struct JsonAllocator *a)
 {
-    static const struct JsonAllocator kAllocatorPrototype = {
-        .malloc = jsonMalloc,
-        .realloc = jsonRealloc,
-        .free = jsonFree,
-    };
-    parser->a = a ? *a : kAllocatorPrototype;
+    parser->a = a ? *a : sAllocatorPrototype;
 }
 
 enum {
@@ -1549,4 +1550,31 @@ JsonValue *jsonContainerGet(JsonValue *container, JsonSize index)
         }
     }
     return jsonCursorValue(&c);
+}
+
+JsonSize jsonSave(char *buffer, JsonSize length, JsonValue *value)
+{
+    const JsonSize needed = sizeOfSubTree(value);
+    if (length >= needed) {
+        memcpy(buffer, value, needed);
+    }
+    return needed;
+}
+
+MEWJSON_NODISCARD
+JsonDocument *jsonLoad(const char *binary, JsonSize length, struct JsonAllocator *a)
+{
+    char *buffer;
+    a = a ? a : &sAllocatorPrototype;
+    JsonDocument *doc = createDocAndBuffer(a, length, &buffer);
+    if (doc) {
+        *doc = (JsonDocument){
+            .a = *a,
+            .buffer = buffer,
+            .length = length,
+            .capacity = length,
+        };
+        memcpy(buffer, binary, length);
+    }
+    return doc;
 }

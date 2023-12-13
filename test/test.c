@@ -675,8 +675,15 @@ static void testCheckRoundtrip(JsonValue *value)
 
 static void checkValueEqualsNode(struct JsonCursor *c, const struct TestcaseNode *node)
 {
-    JsonValue *value = jsonCursorValue(c);
-    // Roundtrip this node by itself.
+    // Roundtrip jsonSave()/jsonLoad().
+    const JsonSize n = jsonSave(NULL, 0, jsonCursorValue(c));
+    char *binary = malloc((size_t)n);
+    CHECK(n == jsonSave(binary, n, jsonCursorValue(c)));
+    JsonDocument *doc = jsonLoad(binary, n, &sAllocator);
+    free(binary);
+    JsonValue *value = jsonRoot(doc);
+
+    // Roundtrip jsonStringify()/jsonParse().
     testCheckRoundtrip(value);
     if (node->type == kTypeKey) {
         CHECK(kTypeString == jsonType(value));
@@ -707,6 +714,8 @@ static void checkValueEqualsNode(struct JsonCursor *c, const struct TestcaseNode
         default: // kTypeObject || kTypeArray
             CHECK(jsonContainerLength(value) == node->size);
     }
+    // Destroy the document created by jsonLoad().
+    jsonDestroyDocument(doc);
 }
 
 static void assertSubTreeEquals(struct JsonCursor *c, const struct TestcaseNode *nodes, JsonSize n)

@@ -1,4 +1,4 @@
-// mewjson: a tiny JSON parser
+// mewjson: a tiny JSON library
 // Distributed under the MIT License (http://opensource.org/licenses/MIT)
 
 #ifndef MEWJSON_H
@@ -193,5 +193,15 @@ JsonBool jsonCursorIsValid(const struct JsonCursor *c);
 
 // Move a cursor to the next JSON value node
 void jsonCursorNext(struct JsonCursor *c);
+
+// Return a pointer to a serialized parse tree representing a JSON value
+// Writes the number of bytes occupied by the parse tree to the "length" parameter.
+JsonSize jsonSave(char *buffer, JsonSize length, JsonValue *value);
+
+// Return a document built from a serialized parse tree
+// The data (and length) passed to this function must be exactly what was returned by a prior
+// call to jsonSave(). Otherwise, the behavior is undefined.
+MEWJSON_NODISCARD
+JsonDocument *jsonLoad(const char *binary, JsonSize length, struct JsonAllocator *a);
 
 #endif // MEWJSON_H
